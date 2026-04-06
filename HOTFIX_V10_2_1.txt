@@ -1,0 +1,10 @@
+V10.2.1 = Decision Text Sync Fix
+
+What changed:
+- synced checklist grade to hard decision mode:
+  - ENTER -> A/A+
+  - PREPARE -> WATCHLIST
+  - NO TRADE -> NO TRADE
+- fixed break text so it no longer says reversal/auto-entry confirmed unless that event actually exists
+- fixed commit text to align with decision state more clearly
+- no changes to core analysis logic; only Telegram decision text/output layer adjusted

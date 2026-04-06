@@ -2251,6 +2251,15 @@ def checklist_mark(ok):
     return "✅" if ok else "❌"
 
 
+def decision_grade_sync(decision, quality=None):
+    quality = quality or "NO TRADE"
+    if decision == "ENTER":
+        return "A+" if quality == "A+" else "A"
+    if decision == "PREPARE":
+        return "WATCHLIST"
+    return "NO TRADE"
+
+
 def hard_decision_engine(side, checks, prev, quality=None, entry_filter=None, commit_info=None, reversal=None, auto_entry=None):
     checks = checks or {}
     trend_ok = bool(checks.get("trend"))
@@ -2298,6 +2307,8 @@ def hard_decision_engine(side, checks, prev, quality=None, entry_filter=None, co
         action_text = "NO TRADE — " + " | ".join(wait_bits[:2] if wait_bits else ["ยังไม่ใช่จุดเข้า"])
         reason_text = "ยังไม่ใช่จังหวะเข้า"
 
+    synced_grade = decision_grade_sync(decision, quality)
+
     return {
         "decision": decision,
         "action_text": action_text,
@@ -2307,25 +2318,37 @@ def hard_decision_engine(side, checks, prev, quality=None, entry_filter=None, co
         "flow_ok": flow_ok,
         "execution_ok": execution_ok,
         "trigger_hint": trigger_hint,
-        "quality": quality,
+        "quality": synced_grade,
+        "raw_quality": quality,
     }
 
 
 def entry_checklist_5s(side, checks, prev, quality=None, entry_filter=None, commit_info=None, reversal=None, auto_entry=None):
     decision = hard_decision_engine(side, checks, prev, quality, entry_filter, commit_info, reversal, auto_entry)
     action_emoji = "🎯" if decision["decision"] == "ENTER" else "🟡" if decision["decision"] == "PREPARE" else "🧘"
-    break_text = 'reversal/auto-entry confirmed' if (reversal or auto_entry) else decision['trigger_hint']
+
+    if auto_entry:
+        break_text = "auto-entry confirmed"
+    elif reversal:
+        break_text = "reversal confirmed"
+    elif decision["structure_ok"]:
+        break_text = "structure confirmed"
+    else:
+        break_text = decision["trigger_hint"]
+
+    commit_line = "เข้าได้" if decision["execution_ok"] else commit_text(commit_info)
 
     return (
         "\n📋 HARD DECISION 5 วิ\n"
         f"1) Bias {checklist_mark(decision['bias_ok'])} trend/htf\n"
         f"2) Break {checklist_mark(decision['structure_ok'])} {break_text}\n"
         f"3) Flow {checklist_mark(decision['flow_ok'])} orderbook + (oi/premium)\n"
-        f"4) Commit {checklist_mark(decision['execution_ok'])} {commit_text(commit_info)}\n"
+        f"4) Commit {checklist_mark(decision['execution_ok'])} {commit_line}\n"
         f"5) Decision {action_emoji} {decision['action_text']}\n"
         f"mode: {decision['decision']}\n"
         f"grade: {decision['quality']}"
     )
+
 
 def sniper_mode_summary(side, true_commit=None, auto_entry=None, entry_filter=None, commit_info=None, plan=None, cur=None, prev=None, checks=None, traps=None, fake_move=None, flip_setup=None):
     checks = checks or {}
