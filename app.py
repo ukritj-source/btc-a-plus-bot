@@ -387,6 +387,70 @@ backup_manager = BackupManager()
 BACKUP_MANAGER_HOOK = backup_manager
 
 
+def render_rows(items):
+    out = []
+    for label, value, cls in items:
+        label_s = html.escape(str(label))
+        value_s = html.escape(str(value))
+        out.append(f'<div class="row"><span class="muted">{label_s}</span><strong class="{cls}">{value_s}</strong></div>')
+    return "".join(out)
+
+
+def render_bot_status_html(bot: Dict) -> str:
+    rows = [
+        ("status", bot.get("status", "-"), "ok" if bot.get("alive") else "warn"),
+        ("alive", bot.get("alive", "-"), "ok" if bot.get("alive") else "err"),
+        ("pid", bot.get("pid", "-"), ""),
+        ("last start", bot.get("last_start_at", "-"), ""),
+        ("last line", bot.get("last_line_at", "-"), ""),
+        ("restarts", bot.get("restart_count", 0), ""),
+        ("engine", bot.get("engine_file", "-"), ""),
+    ]
+    return render_rows(rows)
+
+
+def render_backup_status_html(backup: Dict) -> str:
+    tg = backup.get("telegram", {}) if isinstance(backup, dict) else {}
+    rows = [
+        ("backup loop", backup.get("running", "-"), "ok" if backup.get("running") else "warn"),
+        ("last cycle", backup.get("last_cycle_at", "-"), ""),
+        ("trigger", backup.get("last_trigger_reason", "-"), ""),
+        ("telegram", "enabled" if tg.get("enabled") else "disabled", "ok" if tg.get("enabled") else "warn"),
+        ("last file", tg.get("last_file", "-"), ""),
+        ("last success", tg.get("last_success_at", "-"), ""),
+    ]
+    note = tg.get("last_error") or "Telegram alert/backup active"
+    return render_rows(rows) + f'<div class="muted">{html.escape(str(note))}</div>'
+
+
+def render_summary_html(summary: Dict) -> str:
+    rows = [
+        ("bias", summary.get("bias", "-"), ""),
+        ("phase", summary.get("phase", "-"), ""),
+        ("grade", summary.get("grade", "-"), ""),
+        ("event", summary.get("event", "-"), ""),
+        ("verdict", summary.get("verdict", "-"), ""),
+        ("trigger", summary.get("trigger", "-"), ""),
+    ]
+    return render_rows(rows)
+
+
+def render_state_html(state: Dict) -> str:
+    return f"<pre>{html.escape(json.dumps(state or {}, ensure_ascii=False, indent=2))}</pre>"
+
+
+def render_log_options(files: List[str], current: Optional[str]) -> str:
+    if not files:
+        return '<option value="">no log files</option>'
+    opts = []
+    current = current or files[0]
+    for f in files:
+        selected = ' selected' if f == current else ''
+        opts.append(f'<option value="{html.escape(f)}"{selected}>{html.escape(f)}</option>')
+    return "".join(opts)
+
+
+
 
 
 def safe_text(v) -> str:
@@ -528,223 +592,67 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="5">
-  <title>BTC Bot V9.3.2 Frontend Hydration + Null-safe Render Fix</title>
+  <meta http-equiv="refresh" content="{{ refresh_seconds }}">
+  <title>BTC Bot V9.4 SSR Dashboard</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1020; color:#e7ecf5; margin:0; }
-    .wrap { max-width: 1440px; margin: 0 auto; padding: 16px; }
-    .grid { display:grid; grid-template-columns: 380px 1fr; gap:16px; }
-    .stack > * + * { margin-top: 12px; }
-    .card { background:#131a2e; border:1px solid #24304d; border-radius:16px; padding:16px; box-shadow:0 10px 25px rgba(0,0,0,.25); }
-    h1,h2,h3 { margin:0 0 12px 0; }
-    .muted { color:#93a1bf; font-size:14px; }
+    .wrap { max-width: 1440px; margin: 0 auto; padding: 20px; }
+    .grid { display:grid; grid-template-columns: 360px 1fr; gap:16px; }
+    .card { background:#131a2e; border:1px solid #24304d; border-radius:16px; padding:16px; box-shadow: 0 10px 25px rgba(0,0,0,.25); }
+    h1,h2,h3 { margin: 0 0 12px 0; }
+    .muted { color:#93a1bf; font-size: 14px; }
     .badge { display:inline-block; padding:6px 10px; border-radius:999px; background:#1d2742; border:1px solid #324269; font-size:12px; }
     .ok { color:#7CFC9A; }
     .warn { color:#ffd166; }
     .err { color:#ff7b7b; }
-    .logbox { background:#090d19; color:#d9e4ff; min-height:72vh; white-space:pre-wrap; overflow:auto; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.4; padding:16px; border-radius:12px; border:1px solid #1f2942; }
+    .logbox { background:#090d19; color:#d9e4ff; min-height:72vh; white-space:pre-wrap; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.4; padding:16px; border-radius:12px; border:1px solid #1f2942; }
     .row { display:flex; justify-content:space-between; gap:10px; margin:8px 0; }
-    .mini { border:1px solid #24304d; border-radius:12px; padding:10px; margin:8px 0; background:#10182b; }
-    .label { color:#93a1bf; font-size:12px; margin-bottom:4px; }
-    .value { color:#e7ecf5; font-size:14px; word-break:break-word; }
-    select { width:100%; background:#0d1324; color:#e7ecf5; border:1px solid #324269; border-radius:10px; padding:10px; }
+    .stack > * + * { margin-top: 10px; }
+    select, button { width:100%; background:#0d1324; color:#e7ecf5; border:1px solid #324269; border-radius:10px; padding:10px; }
     a { color:#9ec5ff; text-decoration:none; }
     pre { white-space:pre-wrap; word-break:break-word; margin:0; }
+    form.inline { margin:0; }
   </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>BTC Bot V9.3.2 Frontend Hydration + Null-safe Render Fix</h1>
-  <p class="muted">Server-rendered hydration + null-safe auto refresh refresh + Telegram backup only</p>
+  <h1>BTC Bot V9.4 SSR Dashboard</h1>
+  <p class="muted">Server-side rendered dashboard only + meta refresh every {{ refresh_seconds }}s + Telegram alert only</p>
   <div class="grid">
     <div class="stack">
       <div class="card">
         <h3>Bot Status</h3>
-        <div id="status">{{ initial_bot_html | safe }}</div>
+        {{ initial_bot_html | safe }}
       </div>
       <div class="card">
         <h3>Backup Status</h3>
-        <div id="backup">{{ initial_backup_html | safe }}</div>
+        {{ initial_backup_html | safe }}
       </div>
       <div class="card">
         <h3>Quick Summary</h3>
-        <div id="summary">{{ initial_summary_html | safe }}</div>
+        {{ initial_summary_html | safe }}
       </div>
       <div class="card">
         <h3>Daily Logs</h3>
-        <select id="fileSelect">
-          {% if initial_file_options %}
-            {% for f in initial_file_options %}
-              <option value="{{ f }}" {% if f == initial_current_file %}selected{% endif %}>{{ f }}</option>
-            {% endfor %}
-          {% else %}
-            <option value="">No log files</option>
-          {% endif %}
-        </select>
-        <div style="margin-top:10px"><a id="downloadLink" {% if initial_current_file %}href="/download/{{ initial_current_file }}"{% endif %}>Download selected log</a></div>
+        <form method="get" action="/" class="inline">
+          <select id="fileSelect" name="file">
+            {{ log_options_html | safe }}
+          </select>
+          <div style="margin-top:10px;"><button type="submit">Open selected log</button></div>
+        </form>
+        <div style="margin-top:10px"><a href="/download/{{ selected_file }}">Download selected log</a></div>
       </div>
       <div class="card">
         <h3>State Snapshot</h3>
-        <div id="state"><pre>{{ initial_state_pre }}</pre></div>
+        <div id="state" class="muted">{{ initial_state_html | safe }}</div>
       </div>
     </div>
     <div class="card">
-      <div class="row"><h3>Live Log</h3><span class="badge warn" id="streamBadge">hydrated</span></div>
+      <div class="row"><h3>Live Log</h3><span class="badge ok">auto refresh {{ refresh_seconds }}s</span></div>
       <div id="logbox" class="logbox">{{ initial_log_text }}</div>
     </div>
   </div>
 </div>
-
-<script id="initial-status-data" type="application/json">{{ initial_status_json | safe }}</script>
-<script id="initial-logs-data" type="application/json">{{ initial_logs_json | safe }}</script>
-<script>
-function parseInitialJson(id, fallback) {
-  try {
-    const el = document.getElementById(id);
-    if (!el) return fallback;
-    return JSON.parse(el.textContent || 'null') || fallback;
-  } catch (e) {
-    return fallback;
-  }
-}
-const INITIAL_STATUS = parseInitialJson('initial-status-data', {});
-const INITIAL_LOGS = parseInitialJson('initial-logs-data', {lines: []});
-
-const logbox = document.getElementById('logbox');
-const statusEl = document.getElementById('status');
-const backupEl = document.getElementById('backup');
-const stateEl = document.getElementById('state');
-const summaryEl = document.getElementById('summary');
-const fileSelect = document.getElementById('fileSelect');
-const downloadLink = document.getElementById('downloadLink');
-const streamBadge = document.getElementById('streamBadge');
-streamBadge.textContent = 'auto refresh';
-streamBadge.className = 'badge ok';
-let currentFile = (INITIAL_LOGS && INITIAL_LOGS.file) || (INITIAL_STATUS && INITIAL_STATUS.latest_log_file) || '';
-let lastRenderedBlob = (INITIAL_LOGS && Array.isArray(INITIAL_LOGS.lines)) ? INITIAL_LOGS.lines.join('\n') : '';
-
-function escHtml(s) {
-  return String(s ?? '-')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
-}
-async function jfetch(url) {
-  const r = await fetch(url, {cache: 'no-store'});
-  if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
-  return await r.json();
-}
-function setBadge(text, cls='') {
-  streamBadge.textContent = text;
-  streamBadge.className = 'badge ' + cls;
-}
-function renderSummary(s) {
-  const items = [
-    ['Bias', s && s.bias],
-    ['Phase', s && s.phase],
-    ['Grade', s && s.grade],
-    ['Event', s && s.event],
-    ['Verdict', s && s.verdict],
-    ['Trigger', s && s.trigger],
-  ];
-  summaryEl.innerHTML = items.map(([k,v]) => `<div class="mini"><div class="label">${escHtml(k)}</div><div class="value">${escHtml(v || '-')}</div></div>`).join('');
-}
-function refreshDownload() {
-  const val = fileSelect ? fileSelect.value : '';
-  if (!val) {
-    downloadLink.removeAttribute('href');
-    return;
-  }
-  currentFile = val;
-  downloadLink.href = `/download/${encodeURIComponent(currentFile)}`;
-}
-function renderStatus(data) {
-  const bot = (data && data.bot) || {};
-  statusEl.innerHTML = `
-    <div class="row"><span class="muted">status</span><strong>${escHtml(bot.status || '-')}</strong></div>
-    <div class="row"><span class="muted">alive</span><strong class="${bot.alive ? 'ok' : 'err'}">${escHtml(bot.alive)}</strong></div>
-    <div class="row"><span class="muted">pid</span><strong>${escHtml(bot.pid ?? '-')}</strong></div>
-    <div class="row"><span class="muted">last start</span><strong>${escHtml(bot.last_start_at || '-')}</strong></div>
-    <div class="row"><span class="muted">last line</span><strong>${escHtml(bot.last_line_at || '-')}</strong></div>
-    <div class="row"><span class="muted">restarts</span><strong>${escHtml(bot.restart_count ?? 0)}</strong></div>
-    <div class="row"><span class="muted">engine</span><strong>${escHtml(bot.engine_file || '-')}</strong></div>
-  `;
-  const backup = (data && data.backup) || {};
-  const tg = backup.telegram || {};
-  backupEl.innerHTML = `
-    <div class="row"><span class="muted">backup loop</span><strong class="${backup.running ? 'ok' : 'warn'}">${escHtml(backup.running)}</strong></div>
-    <div class="row"><span class="muted">last cycle</span><strong>${escHtml(backup.last_cycle_at || '-')}</strong></div>
-    <div class="row"><span class="muted">trigger</span><strong>${escHtml(backup.last_trigger_reason || '-')}</strong></div>
-    <div class="row"><span class="muted">telegram</span><strong class="${tg.last_error ? 'err' : 'ok'}">${escHtml(tg.enabled ? 'enabled' : 'disabled')}</strong></div>
-    <div class="row"><span class="muted">last file</span><strong>${escHtml(tg.last_file || '-')}</strong></div>
-    <div class="row"><span class="muted">last success</span><strong>${escHtml(tg.last_success_at || '-')}</strong></div>
-    <div class="muted">${escHtml(tg.last_error ? ('TG error: ' + tg.last_error) : 'Telegram file backup disabled')}</div>
-  `;
-  stateEl.innerHTML = `<pre>${escHtml(JSON.stringify((data && data.state) || {}, null, 2))}</pre>`;
-  const files = Array.isArray(data && data.log_files) ? data.log_files : [];
-  fileSelect.innerHTML = files.length ? files.map(f => `<option value="${escHtml(f)}">${escHtml(f)}</option>`).join('') : '<option value="">No log files</option>';
-  if (!currentFile && files.length) currentFile = files[0];
-  if (currentFile && files.includes(currentFile)) {
-    fileSelect.value = currentFile;
-  } else if (files.length) {
-    currentFile = files[0];
-    fileSelect.value = currentFile;
-  }
-  refreshDownload();
-  renderSummary((data && data.summary) || {});
-}
-function renderLogs(lines) {
-  const safeLines = Array.isArray(lines) ? lines : [];
-  const blob = safeLines.join('\n');
-  logbox.textContent = blob;
-  lastRenderedBlob = blob;
-  logbox.scrollTop = logbox.scrollHeight;
-}
-async function loadSelectedFile() {
-  try {
-    if (!fileSelect.value) return;
-    const data = await jfetch(`/api/logs/${encodeURIComponent(fileSelect.value)}`);
-    renderLogs(data.lines || []);
-    setBadge('auto refresh', 'warn');
-  } catch (e) {
-    setBadge('auto refresh error', 'err');
-  }
-}
-if (fileSelect) {
-  fileSelect.addEventListener('change', async () => {
-    refreshDownload();
-    await loadSelectedFile();
-  });
-}
-async function refreshAll(force=false) {
-  try {
-    const status = await jfetch('/api/status');
-    renderStatus(status);
-    const latestFromStatus = (status && status.latest_log_file) || '';
-    const targetFile = (fileSelect && fileSelect.value) || currentFile || latestFromStatus || '';
-    const target = targetFile ? `/api/logs/${encodeURIComponent(targetFile)}` : '/api/logs';
-    const logs = await jfetch(target);
-    const blob = Array.isArray(logs.lines) ? logs.lines.join('\n') : '';
-    if (force || blob !== lastRenderedBlob) {
-      renderLogs(logs.lines || []);
-    }
-    setBadge('auto refresh', 'ok');
-  } catch (e) {
-    setBadge('offline', 'err');
-  }
-}
-(function bootstrap() {
-  try {
-    renderStatus(INITIAL_STATUS || {});
-    renderLogs((INITIAL_LOGS && INITIAL_LOGS.lines) || []);
-    setBadge('auto refresh', 'ok');
-  } catch (e) {
-    setBadge('render error', 'err');
-  }
-  setTimeout(() => { refreshAll(true); }, 600);
-})();
-setInterval(() => { refreshAll(false); }, 2000);
-</script>
 </body>
 </html>
 """

@@ -1,0 +1,6 @@
+V9.4 SSR NO-JS DASHBOARD
+- Server-side rendered dashboard only
+- No JS dependency for rendering
+- Meta refresh every 5 seconds
+- Log view renders latest file on page load
+- Telegram alert only
