@@ -1,0 +1,4 @@
+V10.2 = Hard Decision Engine
+- Telegram checklist เปลี่ยนเป็น 3 สถานะ: ENTER / PREPARE / NO TRADE
+- ยังส่ง alert สำคัญเหมือนเดิม ไม่ปิด alert pipeline
+- ไม่แตะ core logic วิเคราะห์หลัก

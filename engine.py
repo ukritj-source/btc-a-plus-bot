@@ -2251,7 +2251,7 @@ def checklist_mark(ok):
     return "✅" if ok else "❌"
 
 
-def entry_checklist_5s(side, checks, prev, quality=None, entry_filter=None, commit_info=None, reversal=None, auto_entry=None):
+def hard_decision_engine(side, checks, prev, quality=None, entry_filter=None, commit_info=None, reversal=None, auto_entry=None):
     checks = checks or {}
     trend_ok = bool(checks.get("trend"))
     htf_ok = bool(checks.get("htf"))
@@ -2266,31 +2266,65 @@ def entry_checklist_5s(side, checks, prev, quality=None, entry_filter=None, comm
     quality = quality or signal_quality(checks)
 
     trigger_hint = price_trigger_hint(side, prev, reversal, auto_entry)
+    bias_ok = trend_ok and htf_ok
     structure_ok = break_ok or has_reversal or has_auto_entry
     flow_ok = ob_ok and (oi_ok or prem_ok)
     execution_ok = filter_ok or commit_ok or has_auto_entry
 
-    if has_auto_entry:
-        verdict = f"ENTER {auto_entry.get('side', side)}"
-    elif execution_ok and trend_ok and htf_ok and structure_ok and flow_ok:
-        verdict = f"ENTER {side}"
-    elif has_reversal and trend_ok and htf_ok:
-        verdict = f"WATCH {reversal.get('side', side)}"
-    elif trend_ok and htf_ok:
-        verdict = f"WAIT BREAK — {trigger_hint}"
-    elif htf_ok:
-        verdict = "WAIT LTF ALIGN"
+    if bias_ok and structure_ok and flow_ok and execution_ok:
+        decision = "ENTER"
+        action_text = f"ENTER {auto_entry.get('side', side) if has_auto_entry else side}"
+        reason_text = "ครบทั้ง bias + break + flow + commit"
+    elif bias_ok and (structure_ok or flow_ok or execution_ok):
+        decision = "PREPARE"
+        wait_bits = []
+        if not structure_ok:
+            wait_bits.append(trigger_hint)
+        if not flow_ok:
+            wait_bits.append("รอ flow confirm (orderbook + oi/premium)")
+        if not execution_ok:
+            wait_bits.append("รอ commit จริง")
+        action_text = "PREPARE — " + " | ".join(wait_bits[:2] if wait_bits else ["รอเงื่อนไขครบ"])
+        reason_text = "bias มาแล้ว แต่ยังไม่ครบชุดเข้า"
     else:
-        verdict = "STAND ASIDE"
+        decision = "NO TRADE"
+        wait_bits = []
+        if not bias_ok:
+            wait_bits.append("bias ยังไม่ตรง trend/htf")
+        if not structure_ok:
+            wait_bits.append(trigger_hint)
+        if not flow_ok:
+            wait_bits.append("flow ยังไม่มา")
+        action_text = "NO TRADE — " + " | ".join(wait_bits[:2] if wait_bits else ["ยังไม่ใช่จุดเข้า"])
+        reason_text = "ยังไม่ใช่จังหวะเข้า"
+
+    return {
+        "decision": decision,
+        "action_text": action_text,
+        "reason_text": reason_text,
+        "bias_ok": bias_ok,
+        "structure_ok": structure_ok,
+        "flow_ok": flow_ok,
+        "execution_ok": execution_ok,
+        "trigger_hint": trigger_hint,
+        "quality": quality,
+    }
+
+
+def entry_checklist_5s(side, checks, prev, quality=None, entry_filter=None, commit_info=None, reversal=None, auto_entry=None):
+    decision = hard_decision_engine(side, checks, prev, quality, entry_filter, commit_info, reversal, auto_entry)
+    action_emoji = "🎯" if decision["decision"] == "ENTER" else "🟡" if decision["decision"] == "PREPARE" else "🧘"
+    break_text = 'reversal/auto-entry confirmed' if (reversal or auto_entry) else decision['trigger_hint']
 
     return (
-        "\n📋 ENTRY CHECKLIST 5 วิ\n"
-        f"1) Bias {checklist_mark(trend_ok and htf_ok)} trend/htf\n"
-        f"2) Break {checklist_mark(structure_ok)} {('reversal/auto-entry confirmed' if (has_reversal or has_auto_entry) else trigger_hint)}\n"
-        f"3) Flow {checklist_mark(flow_ok)} orderbook + (oi/premium)\n"
-        f"4) Commit {checklist_mark(execution_ok)} {commit_text(commit_info)}\n"
-        f"5) Action {'🎯' if verdict.startswith('ENTER') else '👀' if verdict.startswith('WATCH') or verdict.startswith('WAIT') else '🧘'} {verdict}\n"
-        f"grade: {quality}"
+        "\n📋 HARD DECISION 5 วิ\n"
+        f"1) Bias {checklist_mark(decision['bias_ok'])} trend/htf\n"
+        f"2) Break {checklist_mark(decision['structure_ok'])} {break_text}\n"
+        f"3) Flow {checklist_mark(decision['flow_ok'])} orderbook + (oi/premium)\n"
+        f"4) Commit {checklist_mark(decision['execution_ok'])} {commit_text(commit_info)}\n"
+        f"5) Decision {action_emoji} {decision['action_text']}\n"
+        f"mode: {decision['decision']}\n"
+        f"grade: {decision['quality']}"
     )
 
 def sniper_mode_summary(side, true_commit=None, auto_entry=None, entry_filter=None, commit_info=None, plan=None, cur=None, prev=None, checks=None, traps=None, fake_move=None, flip_setup=None):

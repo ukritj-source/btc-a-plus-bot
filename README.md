@@ -10,3 +10,9 @@
 
 ## Railway
 ตั้ง start command เป็น `python engine.py` หรือใช้ Procfile ที่ให้มา
+
+
+## V10.2
+- Hard Decision Engine for Telegram checklist
+- Decision states: ENTER / PREPARE / NO TRADE
+- Important alerts remain enabled
