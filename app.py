@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Deque, Dict, List, Optional, Set
 
 import requests
-from flask import Flask, Response, jsonify, render_template_string, send_from_directory, stream_with_context
+from flask import Flask, Response, jsonify, render_template_string, request, send_from_directory, stream_with_context
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
@@ -30,6 +30,10 @@ BOT_RESTART_DELAY_SEC = int(os.getenv("BOT_RESTART_DELAY_SEC", "5"))
 TAIL_LINES = int(os.getenv("TAIL_LINES", "400"))
 MAX_BUFFER_LINES = int(os.getenv("MAX_BUFFER_LINES", "1000"))
 TZ_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "7"))
+DEFAULT_REFRESH_SECONDS = int(os.getenv("DASHBOARD_REFRESH_SECONDS", "5"))
+FAST_REFRESH_SECONDS = int(os.getenv("DASHBOARD_FAST_REFRESH_SECONDS", "3"))
+SLOW_REFRESH_SECONDS = int(os.getenv("DASHBOARD_SLOW_REFRESH_SECONDS", "8"))
+RECENT_ACTIVITY_WINDOW_SEC = int(os.getenv("DASHBOARD_RECENT_ACTIVITY_WINDOW_SEC", "90"))
 
 ENABLE_BACKUP = os.getenv("ENABLE_BACKUP", "true").lower() == "true"
 ENABLE_TELEGRAM_BACKUP = os.getenv("ENABLE_TELEGRAM_BACKUP", "true").lower() == "true"
@@ -518,31 +522,58 @@ def render_backup_status_html(backup: Dict) -> str:
 
 @app.route("/")
 def dashboard():
+    requested_file = (request.args.get("file") or "").strip()
+    log_files = [p.name for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:14]]
     latest = latest_log_file()
+    selected_file = requested_file if requested_file in log_files else (latest.name if latest else None)
+    selected_path = (LOG_DIR / selected_file) if selected_file else latest
+    log_lines = tail_file(selected_path) if selected_path else list(supervisor.buffer)
+    summary_source = tail_file(latest) if latest else log_lines
+    state = read_state()
+    bot = supervisor.health()
+    backup = backup_manager.health()
+
+    refresh_seconds = DEFAULT_REFRESH_SECONDS
+    latest_activity_ts = max(filter(None, [supervisor.last_line_at, latest.stat().st_mtime if latest and latest.exists() else None]), default=None)
+    if latest_activity_ts is not None:
+        age_sec = max(0, time.time() - latest_activity_ts)
+        refresh_seconds = FAST_REFRESH_SECONDS if age_sec <= RECENT_ACTIVITY_WINDOW_SEC else SLOW_REFRESH_SECONDS
+
     initial_status = {
-        "bot": supervisor.health(),
-        "backup": backup_manager.health(),
-        "state": read_state(),
-        "summary": summarize_log(tail_file(latest)) if latest else {},
+        "bot": bot,
+        "backup": backup,
+        "state": state,
+        "summary": summarize_log(summary_source) if summary_source else {},
         "latest_log_file": latest.name if latest else None,
-        "log_files": [p.name for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:14]],
+        "log_files": log_files,
+        "selected_file": selected_file,
+        "refresh_seconds": refresh_seconds,
     }
     initial_logs = {
-        "file": latest.name if latest else None,
-        "lines": tail_file(latest) if latest else list(supervisor.buffer),
+        "file": selected_file,
+        "lines": log_lines,
     }
-    return render_template_string(
+    html_out = render_template_string(
         TEMPLATE,
         initial_status_json=json.dumps(initial_status, ensure_ascii=False),
         initial_logs_json=json.dumps(initial_logs, ensure_ascii=False),
-        initial_bot_html=render_bot_status_html(initial_status["bot"]),
-        initial_backup_html=render_backup_status_html(initial_status["backup"]),
+        initial_bot_html=render_bot_status_html(bot),
+        initial_backup_html=render_backup_status_html(backup),
         initial_summary_html=render_summary_cards(initial_status["summary"]),
-        initial_state_pre=json.dumps(initial_status["state"], ensure_ascii=False, indent=2),
-        initial_file_options=initial_status["log_files"],
+        initial_state_html=render_state_html(state),
+        initial_file_options=log_files,
+        log_options_html=render_log_options(log_files, selected_file),
+        selected_file=selected_file or "",
         initial_current_file=initial_logs["file"],
         initial_log_text="\n".join(initial_logs["lines"]),
+        refresh_seconds=refresh_seconds,
     )
+    response = Response(html_out)
+    response.headers["Refresh"] = str(refresh_seconds)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/health")

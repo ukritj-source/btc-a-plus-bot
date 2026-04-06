@@ -1,0 +1,17 @@
+V9.4.1 = SSR + Smart Refresh (เนียน + เบา + เสถียรจริง)
+
+สิ่งที่แก้:
+1) แก้ SSR dashboard ให้ render ตัวแปรครบ ไม่ error หน้าเว็บ
+2) เพิ่ม smart refresh:
+   - active log สดใหม่ -> refresh เร็ว (default 3s)
+   - ช่วงเงียบ -> refresh ช้าลง (default 8s)
+3) รองรับเปิด log file ที่เลือกจาก query param ?file=
+4) เพิ่ม HTTP Refresh header ควบคู่กับ meta refresh
+5) ปิด cache ฝั่ง browser/proxy ลดอาการหน้าไม่อัปเดต
+6) selected log download ได้ตรงไฟล์ที่เลือก
+
+ENV ใหม่:
+- DASHBOARD_REFRESH_SECONDS=5
+- DASHBOARD_FAST_REFRESH_SECONDS=3
+- DASHBOARD_SLOW_REFRESH_SECONDS=8
+- DASHBOARD_RECENT_ACTIVITY_WINDOW_SEC=90
