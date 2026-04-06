@@ -528,6 +528,7 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5">
   <title>BTC Bot V9.3.2 Frontend Hydration + Null-safe Render Fix</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1020; color:#e7ecf5; margin:0; }
@@ -554,7 +555,7 @@ TEMPLATE = """
 <body>
 <div class="wrap">
   <h1>BTC Bot V9.3.2 Frontend Hydration + Null-safe Render Fix</h1>
-  <p class="muted">Server-rendered hydration + null-safe polling refresh + Telegram backup only</p>
+  <p class="muted">Server-rendered hydration + null-safe auto refresh refresh + Telegram backup only</p>
   <div class="grid">
     <div class="stack">
       <div class="card">
@@ -617,6 +618,8 @@ const summaryEl = document.getElementById('summary');
 const fileSelect = document.getElementById('fileSelect');
 const downloadLink = document.getElementById('downloadLink');
 const streamBadge = document.getElementById('streamBadge');
+streamBadge.textContent = 'auto refresh';
+streamBadge.className = 'badge ok';
 let currentFile = (INITIAL_LOGS && INITIAL_LOGS.file) || (INITIAL_STATUS && INITIAL_STATUS.latest_log_file) || '';
 let lastRenderedBlob = (INITIAL_LOGS && Array.isArray(INITIAL_LOGS.lines)) ? INITIAL_LOGS.lines.join('\n') : '';
 
@@ -702,9 +705,9 @@ async function loadSelectedFile() {
     if (!fileSelect.value) return;
     const data = await jfetch(`/api/logs/${encodeURIComponent(fileSelect.value)}`);
     renderLogs(data.lines || []);
-    setBadge('polling', 'warn');
+    setBadge('auto refresh', 'warn');
   } catch (e) {
-    setBadge('polling error', 'err');
+    setBadge('auto refresh error', 'err');
   }
 }
 if (fileSelect) {

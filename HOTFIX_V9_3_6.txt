@@ -1,0 +1,4 @@
+V9.3.6 HARD REFRESH DASHBOARD FIX
+- Added meta refresh every 5 seconds
+- Added no-store polling every 2 seconds
+- Disabled stream dependency for dashboard refresh

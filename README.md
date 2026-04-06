@@ -22,3 +22,9 @@ ENABLE_BACKUP=true
 ENABLE_TELEGRAM_BACKUP=true
 TELEGRAM_BACKUP_CHAT_ID=...
 BACKUP_INTERVAL_SEC=300
+
+
+V9.3.6 hard refresh fix:
+- Dashboard uses hard page refresh fallback every 5 seconds.
+- Also polls /api/status and /api/logs every 2 seconds.
+- Intended to work reliably on Railway/browser cache edge cases.
