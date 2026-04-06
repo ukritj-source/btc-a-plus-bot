@@ -1,30 +1,12 @@
-# BTC Bot V9.3 Smart Dashboard
+# BTC Telegram Log Engine V10
 
-Telegram-backup-only dashboard package.
+เวอร์ชันนี้ตัด dashboard ออก แล้วรัน `engine.py` ตรงเพื่อส่งสัญญาณสำคัญไป Telegram
 
-## Main upgrades
-- Smart summary cards: Bias, Phase, Grade, Event, Verdict, Trigger
-- Live log with SSE + polling fallback
-- Stronger status API and health endpoint
-- Daily log dropdown and download
-- Railway-friendly SSE headers and bootstrap files
+## จุดเด่น
+- ใช้ core logic เดิมของ V9.4.2 ต่อเนื่อง
+- เพิ่ม file logging ใน `data/logs/YYYY-MM-DD.log`
+- ส่ง Telegram alert สำหรับ A+, trap, reversal, auto-entry, fake move, institutional smash, auto-flip, short squeeze
+- ส่ง live snapshot เป็นระยะเมื่อมีบริบทสำคัญ
 
-## Required Railway variables
-RUN_BOT=true
-DATA_DIR=./data
-LOG_DIR=./data/logs
-STATE_FILE=./data/btc_state.json
-BACKUP_STATE_FILE=./data/backup_state.json
-ENABLE_TELEGRAM=true
-TELEGRAM_TOKEN=...
-CHAT_ID=...
-ENABLE_BACKUP=true
-ENABLE_TELEGRAM_BACKUP=true
-TELEGRAM_BACKUP_CHAT_ID=...
-BACKUP_INTERVAL_SEC=300
-
-
-V9.3.6 hard refresh fix:
-- Dashboard uses hard page refresh fallback every 5 seconds.
-- Also polls /api/status and /api/logs every 2 seconds.
-- Intended to work reliably on Railway/browser cache edge cases.
+## Railway
+ตั้ง start command เป็น `python engine.py` หรือใช้ Procfile ที่ให้มา

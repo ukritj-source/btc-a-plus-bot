@@ -24,10 +24,53 @@ BTC A+ V9.1 EARLY EXPANSION / SHORT SQUEEZE SYNC ENGINE — STRICT / BALANCED + 
 
 import json
 import os
+import sys
 import time
+from pathlib import Path
 from datetime import UTC, datetime
 
 import requests
+
+# ================= FILE LOG TEE =================
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+LOG_DIR = Path(os.getenv("LOG_DIR", DATA_DIR / "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _daily_log_path() -> Path:
+    return LOG_DIR / f"{datetime.utcnow().strftime('%Y-%m-%d')}.log"
+
+
+class _LineBufferedTee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+                s.flush()
+            except Exception:
+                pass
+        return len(data)
+
+    def flush(self):
+        for s in self.streams:
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+
+def setup_file_logging():
+    try:
+        logfile = _daily_log_path().open("a", encoding="utf-8", buffering=1)
+        sys.stdout = _LineBufferedTee(sys.__stdout__, logfile)
+        sys.stderr = _LineBufferedTee(sys.__stderr__, logfile)
+        print(f"[{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}] file logging ready: {logfile.name}")
+    except Exception as e:
+        print(f"file logging setup error: {e}")
 
 
 # ================= CONFIG =================
@@ -110,6 +153,12 @@ ENABLE_TRAP_ALERT = True
 ENABLE_REVERSAL_ALERT = True
 ENABLE_AUTO_ENTRY_ALERT = True
 ENABLE_A_PLUS_ALERT = True
+
+ENABLE_TELEGRAM_LIVE_LOG = os.getenv("ENABLE_TELEGRAM_LIVE_LOG", "true").lower() == "true"
+ENABLE_TELEGRAM_FAKE_MOVE_ALERT = os.getenv("ENABLE_TELEGRAM_FAKE_MOVE_ALERT", "true").lower() == "true"
+ENABLE_TELEGRAM_SMASH_ALERT = os.getenv("ENABLE_TELEGRAM_SMASH_ALERT", "true").lower() == "true"
+ENABLE_TELEGRAM_PROBE_ALERT = os.getenv("ENABLE_TELEGRAM_PROBE_ALERT", "false").lower() == "true"
+LIVE_SUMMARY_MIN_SECONDS = int(os.getenv("LIVE_SUMMARY_MIN_SECONDS", "180"))
 
 BIAS_FLIP_RESET_ON_CLOSED = True
 BIAS_FLIP_CONFIRM_BARS = 2
@@ -301,6 +350,7 @@ _last_live_state_print_ts = 0
 _live_candidate_state_signature = None
 _live_candidate_state_count = 0
 _startup_telegram_test_done = False
+_last_live_summary_ts = 0.0
 _last_state_save_ts = 0
 
 _last_short_trap = None
@@ -2776,6 +2826,7 @@ def print_log(title, side, bias_text, checks, extra, cur, prev, quality, traps, 
     print(f"NOTE         : {sniper['note']}")
     print("=" * 100)
 
+
 def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=None, auto_entry=None, entry_filter=None, commit_info=None):
     prob = probability_score(side, checks, traps, reversal, auto_entry, extra.get("ob"), extra.get("oi"), extra.get("premium"))
     targets = liquidity_targets(side, prev, _last_short_trap if side == "SHORT" else _last_long_trap, reversal or auto_entry, extra.get("atr"))
@@ -2816,6 +2867,63 @@ def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=N
         f"probability: {prob}/100\n"
         f"targets: {target_txt}"
     )
+
+
+def build_special_event_message(tag, cur, prev, extra, detail, side=None, checks=None, traps=None):
+    checks = checks or {}
+    traps = traps or []
+    side_ctx = side or detail.get("side") or "LONG"
+    prob = probability_score(side_ctx, checks, traps, None, None, extra.get("ob"), extra.get("oi"), extra.get("premium"))
+    headline = {
+        "FAKE_MOVE": "🎭 FAKE MOVE",
+        "SMASH": "💥 INSTITUTIONAL SMASH",
+        "PROBABLE_SMASH": "⚠️ PROBABLE SMASH",
+        "FLIP": "🔄 AUTO FLIP",
+        "SQUEEZE": "🧨 SHORT SQUEEZE",
+        "LIVE": "📡 LIVE UPDATE",
+    }.get(tag, f"📣 {tag}")
+    reasons = detail.get("reasons") or []
+    why = detail.get("why") or detail.get("reason") or (' + '.join(reasons) if reasons else '-')
+    trigger = detail.get("entry_hint") or detail.get("label") or "watch reaction"
+    reclaim = detail.get("reclaim_level")
+    reclaim_txt = fmt_price(reclaim) if reclaim is not None else "n/a"
+    return (
+        f"{headline} {SYMBOL}\n"
+        f"time: {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])}\n"
+        f"price: {fmt_price(cur['c'])}\n"
+        f"event: {detail.get('label', tag)}\n"
+        f"side: {side_ctx}\n"
+        f"probability: {prob}/100\n"
+        f"reclaim/trigger: {reclaim_txt} | {trigger}\n"
+        f"ob={fmt_num(extra.get('ob'),4)} | oi={fmt_pct(extra.get('oi'),4)} | premium={fmt_num(extra.get('premium'),8)}\n"
+        f"why: {why}"
+    )
+
+
+def maybe_send_live_summary(side, cur, prev, checks, extra, traps, reversal=None, auto_entry=None, fake_move=None, smash=None, probable_smash=None, flip_setup=None, squeeze_sync=None):
+    global _last_live_summary_ts
+    if not ENABLE_TELEGRAM or not ENABLE_TELEGRAM_LIVE_LOG:
+        return
+    now_ts = time.time()
+    if (now_ts - _last_live_summary_ts) < LIVE_SUMMARY_MIN_SECONDS:
+        return
+    priority = any([auto_entry, reversal, fake_move, smash, probable_smash, flip_setup, squeeze_sync, traps])
+    score = sum(1 for v in checks.values() if v)
+    if not priority and score < 5:
+        return
+    _last_live_summary_ts = now_ts
+    phase = live_phase_text(side, traps, reversal, auto_entry, fake_move, checks, cur=cur, prev=prev, ob=extra.get("ob"), oi_v=extra.get("oi"), prem=extra.get("premium"), atr_v=extra.get("atr"))
+    live_msg = (
+        f"📡 LIVE SNAPSHOT {SYMBOL}\n"
+        f"time: {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])}\n"
+        f"price: {fmt_price(cur['c'])} | high={fmt_price(cur['h'])} | low={fmt_price(cur['l'])}\n"
+        f"bias: {side} | phase: {phase}\n"
+        f"checks: {compact_reason(checks)}\n"
+        f"state: {state_text(side, checks, traps, reversal, auto_entry)}\n"
+        f"action: {action_now_text(side, signal_quality(checks), checks, prev, traps, reversal, auto_entry)}\n"
+        f"raw: ob={fmt_num(extra.get('ob'),4)} | oi={fmt_pct(extra.get('oi'),4)} | premium={fmt_num(extra.get('premium'),8)}"
+    )
+    send_telegram(live_msg)
 
 
 def should_print_live_log(side, bias_text, checks, extra, cur, prev, traps, reversal=None, auto_entry=None, fake_move=None, smash=None, probable_smash=None, probe_entry=None, distribution_zone=None):
@@ -2890,6 +2998,7 @@ def should_print_live_log(side, bias_text, checks, extra, cur, prev, traps, reve
 apply_mode_profile(MODE_PROFILE)
 print(f"[{now()}] BOT STARTED | V9.1 EARLY EXPANSION / SHORT SQUEEZE SYNC ENGINE | MODE={MODE_PROFILE}")
 load_state()
+setup_file_logging()
 startup_telegram_test()
 
 while True:
@@ -3028,6 +3137,18 @@ while True:
             distribution_zone = detect_distribution_zone(side, cur, prev, atr_v, ef[-1], em[-1], es[-1], ob, oi_v, prem, fake_move)
             early_break_ctx = detect_early_break(side, cur, prev, ob, oi_v, prem, atr_v)
             probe_entry = detect_layered_probe_entry(side, prob_for_filter, probable_smash, early_break_ctx, distribution_zone)
+            if fake_move and fake_move.get("active") and ENABLE_TELEGRAM_FAKE_MOVE_ALERT and can_send_alert(f"FAKE-{fake_move.get('type')}-{cur['close_time']}"):
+                send_telegram(build_special_event_message("FAKE_MOVE", cur, prev, extra, fake_move, side=side, checks=chosen_checks, traps=chosen_traps))
+            if smash and smash.get("active") and ENABLE_TELEGRAM_SMASH_ALERT and can_send_alert(f"SMASH-{smash.get('side')}-{cur['close_time']}"):
+                send_telegram(build_special_event_message("SMASH", cur, prev, extra, smash, side=smash.get("side"), checks=chosen_checks, traps=chosen_traps))
+            if probable_smash and probable_smash.get("active") and ENABLE_TELEGRAM_SMASH_ALERT and can_send_alert(f"PROBABLE-SMASH-{probable_smash.get('side')}-{cur['close_time']}"):
+                send_telegram(build_special_event_message("PROBABLE_SMASH", cur, prev, extra, probable_smash, side=probable_smash.get("side"), checks=chosen_checks, traps=chosen_traps))
+            if flip_setup and flip_setup.get("active") and can_send_alert(f"FLIP-{flip_setup.get('side')}-{cur['close_time']}"):
+                send_telegram(build_special_event_message("FLIP", cur, prev, extra, flip_setup, side=flip_setup.get("side"), checks=checks_l, traps=traps_s))
+            if squeeze_sync and squeeze_sync.get("active") and can_send_alert(f"SQUEEZE-{squeeze_sync.get('side')}-{cur['close_time']}"):
+                send_telegram(build_special_event_message("SQUEEZE", cur, prev, extra, squeeze_sync, side=squeeze_sync.get("side"), checks=checks_l, traps=traps_s))
+            if probe_entry and probe_entry.get("active") and ENABLE_TELEGRAM_PROBE_ALERT and can_send_alert(f"PROBE-{probe_entry.get('side')}-{cur['close_time']}"):
+                send_telegram(build_special_event_message("LIVE", cur, prev, extra, probe_entry, side=probe_entry.get("side"), checks=chosen_checks, traps=chosen_traps))
             early_entry = detect_early_entry(side, chosen_checks, reversal, shown_auto_entry, chosen_traps, prob_for_filter)
             trap_exploit = detect_trap_exploit(side, chosen_traps, reversal, prob_for_filter)
 
@@ -3221,6 +3342,11 @@ while True:
 
                 if locked_auto_entry_live and ENABLE_AUTO_ENTRY_ALERT and can_send_alert(f"LIVE-AUTO-{locked_auto_entry_live['side']}-{open_cur['open_time']}"):
                     send_telegram(build_alert_message(side_live, open_cur["c"], chosen_live_checks, open_cur, cur, extra_live, chosen_live_traps, reversal_live, locked_auto_entry_live, entry_filter_live, commit_info_live))
+                maybe_send_live_summary(
+                    side_live, open_cur, cur, chosen_live_checks, extra_live, chosen_live_traps,
+                    reversal_live, shown_auto_entry_live, fake_move_live, smash_live, probable_smash_live,
+                    flip_setup_live, squeeze_sync_live,
+                )
 
         time.sleep(SLEEP)
 
