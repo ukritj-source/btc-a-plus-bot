@@ -384,7 +384,24 @@ BACKUP_MANAGER_HOOK = backup_manager
 
 @app.route("/")
 def dashboard():
-    return render_template_string(TEMPLATE)
+    latest = latest_log_file()
+    initial_status = {
+        "bot": supervisor.health(),
+        "backup": backup_manager.health(),
+        "state": read_state(),
+        "summary": summarize_log(tail_file(latest)) if latest else {},
+        "latest_log_file": latest.name if latest else None,
+        "log_files": [p.name for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:14]],
+    }
+    initial_logs = {
+        "file": latest.name if latest else None,
+        "lines": tail_file(latest) if latest else list(supervisor.buffer),
+    }
+    return render_template_string(
+        TEMPLATE,
+        initial_status_json=json.dumps(initial_status, ensure_ascii=False),
+        initial_logs_json=json.dumps(initial_logs, ensure_ascii=False),
+    )
 
 
 @app.route("/health")
@@ -460,13 +477,14 @@ def stream():
     return Response(stream_with_context(event_stream()), mimetype="text/event-stream", headers=headers)
 
 
+
 TEMPLATE = """
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BTC Bot V9.3 Smart Dashboard</title>
+  <title>BTC Bot V9.3.1 Dashboard Render Fix</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1020; color:#e7ecf5; margin:0; }
     .wrap { max-width: 1500px; margin: 0 auto; padding: 20px; }
@@ -492,8 +510,8 @@ TEMPLATE = """
 </head>
 <body>
 <div class="wrap">
-  <h1>BTC Bot V9.3 Smart Dashboard</h1>
-  <p class="muted">Live log + daily log files + bot supervisor + backup status + quick market summary</p>
+  <h1>BTC Bot V9.3.1 Dashboard Render Fix</h1>
+  <p class="muted">Server-rendered initial state + polling refresh + Telegram backup only</p>
   <div class="grid">
     <div class="stack">
       <div class="card">
@@ -519,12 +537,15 @@ TEMPLATE = """
       </div>
     </div>
     <div class="card">
-      <div class="row"><h3>Live Log</h3><span class="badge" id="streamBadge">connecting...</span></div>
+      <div class="row"><h3>Live Log</h3><span class="badge warn" id="streamBadge">polling</span></div>
       <div id="logbox" class="logbox"></div>
     </div>
   </div>
 </div>
 <script>
+const INITIAL_STATUS = {{ initial_status_json | safe }};
+const INITIAL_LOGS = {{ initial_logs_json | safe }};
+
 const logbox = document.getElementById('logbox');
 const statusEl = document.getElementById('status');
 const backupEl = document.getElementById('backup');
@@ -535,13 +556,37 @@ const downloadLink = document.getElementById('downloadLink');
 const streamBadge = document.getElementById('streamBadge');
 let currentFile = null;
 let lastRenderedBlob = '';
-let usingPolling = false;
-let es = null;
 
 async function jfetch(url) {
   const r = await fetch(url, {cache: 'no-store'});
   if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
   return await r.json();
+}
+
+function setBadge(text, cls='') {
+  streamBadge.textContent = text;
+  streamBadge.className = 'badge ' + cls;
+}
+
+function renderSummary(s) {
+  const items = [
+    ['Bias', s.bias || '-'],
+    ['Phase', s.phase || '-'],
+    ['Grade', s.grade || '-'],
+    ['Event', s.event || '-'],
+    ['Verdict', s.verdict || '-'],
+    ['Trigger', s.trigger || '-'],
+  ];
+  summaryEl.innerHTML = items.map(([k,v]) => `<div class="mini"><div class="label">${k}</div><div class="value">${v}</div></div>`).join('');
+}
+
+function refreshDownload() {
+  if (!fileSelect.value) {
+    downloadLink.removeAttribute('href');
+    return;
+  }
+  currentFile = fileSelect.value;
+  downloadLink.href = `/download/${encodeURIComponent(currentFile)}`;
 }
 
 function renderStatus(data) {
@@ -572,39 +617,31 @@ function renderStatus(data) {
   const files = data.log_files || [];
   fileSelect.innerHTML = files.length ? files.map(f => `<option value="${f}">${f}</option>`).join('') : '<option value="">No log files</option>';
   if (!currentFile && files.length) currentFile = files[0];
-  fileSelect.value = currentFile || '';
+  if (currentFile && files.includes(currentFile)) {
+    fileSelect.value = currentFile;
+  } else if (files.length) {
+    currentFile = files[0];
+    fileSelect.value = currentFile;
+  }
   refreshDownload();
   renderSummary(data.summary || {});
 }
 
-function renderSummary(s) {
-  const items = [
-    ['Bias', s.bias || '-'],
-    ['Phase', s.phase || '-'],
-    ['Grade', s.grade || '-'],
-    ['Event', s.event || '-'],
-    ['Verdict', s.verdict || '-'],
-    ['Trigger', s.trigger || '-'],
-  ];
-  summaryEl.innerHTML = items.map(([k,v]) => `<div class="mini"><div class="label">${k}</div><div class="value">${v}</div></div>`).join('');
-}
-
-function refreshDownload() {
-  if (!fileSelect.value) {
-    downloadLink.removeAttribute('href');
-    return;
-  }
-  currentFile = fileSelect.value;
-  downloadLink.href = `/download/${encodeURIComponent(currentFile)}`;
-}
-
-async function loadSelectedFile() {
-  if (!fileSelect.value) return;
-  const data = await jfetch(`/api/logs/${encodeURIComponent(fileSelect.value)}`);
-  const blob = (data.lines || []).join('\n');
+function renderLogs(lines) {
+  const blob = (lines || []).join('\n');
   logbox.textContent = blob;
   lastRenderedBlob = blob;
   logbox.scrollTop = logbox.scrollHeight;
+}
+
+async function loadSelectedFile() {
+  try {
+    if (!fileSelect.value) return;
+    const data = await jfetch(`/api/logs/${encodeURIComponent(fileSelect.value)}`);
+    renderLogs(data.lines || []);
+  } catch (e) {
+    setBadge('polling error', 'err');
+  }
 }
 
 fileSelect.addEventListener('change', async () => {
@@ -612,78 +649,29 @@ fileSelect.addEventListener('change', async () => {
   await loadSelectedFile();
 });
 
-async function bootstrap() {
-  const status = await jfetch('/api/status');
-  renderStatus(status);
-  const logs = await jfetch('/api/logs');
-  const blob = (logs.lines || []).join('\n');
-  logbox.textContent = blob;
-  lastRenderedBlob = blob;
-  logbox.scrollTop = logbox.scrollHeight;
-}
-
-function setBadge(text, cls='') {
-  streamBadge.textContent = text;
-  streamBadge.className = 'badge ' + cls;
-}
-
-async function pollingRefresh() {
+async function refreshAll() {
   try {
-    const logs = await jfetch(currentFile ? `/api/logs/${encodeURIComponent(currentFile)}` : '/api/logs');
+    const [status, logs] = await Promise.all([
+      jfetch('/api/status'),
+      jfetch(currentFile ? `/api/logs/${encodeURIComponent(currentFile)}` : '/api/logs'),
+    ]);
+    renderStatus(status);
     const blob = (logs.lines || []).join('\n');
-    if (blob !== lastRenderedBlob) {
-      logbox.textContent = blob;
-      lastRenderedBlob = blob;
-      logbox.scrollTop = logbox.scrollHeight;
-    }
+    if (blob !== lastRenderedBlob) renderLogs(logs.lines || []);
     setBadge('polling', 'warn');
   } catch (e) {
     setBadge('offline', 'err');
   }
 }
 
-function startPollingFallback() {
-  if (usingPolling) return;
-  usingPolling = true;
+function bootstrap() {
+  renderStatus(INITIAL_STATUS || {});
+  renderLogs((INITIAL_LOGS && INITIAL_LOGS.lines) || []);
   setBadge('polling', 'warn');
-  setInterval(pollingRefresh, 4000);
 }
 
-function connectStream() {
-  try {
-    es = new EventSource('/stream');
-    const failSafe = setTimeout(() => {
-      if (streamBadge.textContent === 'connecting...') startPollingFallback();
-    }, 5000);
-    es.onopen = () => {
-      clearTimeout(failSafe);
-      usingPolling = false;
-      setBadge('live', 'ok');
-    };
-    es.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
-      logbox.textContent += (logbox.textContent ? '\n' : '') + payload.line;
-      lastRenderedBlob = logbox.textContent;
-      logbox.scrollTop = logbox.scrollHeight;
-    };
-    es.onerror = () => {
-      startPollingFallback();
-    };
-  } catch (e) {
-    startPollingFallback();
-  }
-}
-
-setInterval(async () => {
-  try {
-    const status = await jfetch('/api/status');
-    renderStatus(status);
-  } catch (e) {
-    setBadge('offline', 'err');
-  }
-}, 10000);
-
-bootstrap().then(connectStream).catch(() => startPollingFallback());
+bootstrap();
+setInterval(refreshAll, 4000);
 </script>
 </body>
 </html>
