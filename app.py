@@ -10,7 +10,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Deque, Dict, List, Optional
+from typing import Deque, Dict, List, Optional, Set
 
 import requests
 from flask import Flask, Response, jsonify, render_template_string, send_from_directory, stream_with_context
@@ -42,6 +42,18 @@ GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+def ensure_bootstrap_files() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not STATE_FILE.exists():
+        STATE_FILE.write_text(json.dumps({"bootstrapped_at": datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d %H:%M:%S"), "status": "bootstrapped"}, ensure_ascii=False, indent=2), encoding="utf-8")
+    today = datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d")
+    log_file = LOG_DIR / f"{today}.log"
+    if not log_file.exists():
+        log_file.write_text("", encoding="utf-8")
+
+ensure_bootstrap_files()
+
 # Ensure engine shares the same state file path
 os.environ["STATE_FILE"] = str(STATE_FILE)
 
@@ -56,6 +68,9 @@ def iso_time(ts: Optional[float]) -> Optional[str]:
 
 def timestamp_text() -> str:
     return datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d %H:%M:%S")
+
+
+BACKUP_MANAGER_HOOK = None
 
 
 def md5_file(path: Path) -> str:
@@ -114,7 +129,15 @@ class BotSupervisor:
         logfile.parent.mkdir(parents=True, exist_ok=True)
         with logfile.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
+        if not STATE_FILE.exists():
+            STATE_FILE.write_text(json.dumps({"last_log_line_at": timestamp_text(), "status": "running"}, ensure_ascii=False, indent=2), encoding="utf-8")
         self._broadcast(line)
+        hook = globals().get("BACKUP_MANAGER_HOOK")
+        if hook is not None:
+            try:
+                hook.trigger_now(reason=f"log-updated:{logfile.name}")
+            except Exception:
+                pass
 
     def _run_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -195,15 +218,23 @@ class BackupManager:
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
+        self.wake_event = threading.Event()
+        self.pending_reasons: Set[str] = set()
         self.state = self._load_state()
         self.status: Dict = {
             "running": False,
             "last_cycle_at": None,
             "last_success_at": None,
             "last_error": None,
+            "last_trigger_reason": None,
             "telegram": {"enabled": ENABLE_TELEGRAM_BACKUP, "last_success_at": None, "last_file": None, "last_error": None},
             "gdrive": {"enabled": ENABLE_GDRIVE_BACKUP, "last_success_at": None, "last_file": None, "last_error": None},
         }
+
+    def trigger_now(self, reason: str = "manual") -> None:
+        self.pending_reasons.add(reason)
+        self.status["last_trigger_reason"] = reason
+        self.wake_event.set()
 
     def _load_state(self) -> Dict:
         if not BACKUP_STATE_FILE.exists():
@@ -307,6 +338,7 @@ class BackupManager:
         return files
 
     def _cycle(self) -> None:
+        ensure_bootstrap_files()
         files = self._collect_files()
         service = None
         for path in files:
@@ -322,6 +354,7 @@ class BackupManager:
 
     def _run_loop(self) -> None:
         self.status["running"] = True
+        self.trigger_now(reason="startup")
         while not self.stop_event.is_set():
             self.status["last_cycle_at"] = iso_time(time.time())
             try:
@@ -329,8 +362,8 @@ class BackupManager:
                 self.status["last_error"] = None
             except Exception as exc:
                 self.status["last_error"] = str(exc)
-                # channel-specific marks are handled inside channel sends when possible
-            self.stop_event.wait(BACKUP_INTERVAL_SEC)
+            self.wake_event.clear()
+            self.wake_event.wait(BACKUP_INTERVAL_SEC)
         self.status["running"] = False
 
     def start(self) -> None:
@@ -344,6 +377,7 @@ class BackupManager:
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.wake_event.set()
 
     def health(self) -> Dict:
         return self.status
@@ -351,6 +385,7 @@ class BackupManager:
 
 supervisor = BotSupervisor()
 backup_manager = BackupManager()
+BACKUP_MANAGER_HOOK = backup_manager
 
 
 def tail_file(path: Optional[Path], max_lines: int = TAIL_LINES) -> List[str]:
