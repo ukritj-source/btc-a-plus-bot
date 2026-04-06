@@ -1,0 +1,4 @@
+V10.3 = Auto-entry wording + decision sync fix
+- If auto-entry exists but flow is not confirmed, text now says setup forming / PREPARE instead of enter
+- Commit no longer shows passed just because auto-entry label exists
+- Core analysis logic unchanged

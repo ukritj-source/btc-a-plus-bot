@@ -16,3 +16,7 @@
 - Hard Decision Engine for Telegram checklist
 - Decision states: ENTER / PREPARE / NO TRADE
 - Important alerts remain enabled
+
+
+## V10.3
+- Decision text sync fix for auto-entry states: if flow is not confirmed, Telegram text stays in PREPARE/setup forming instead of ENTER.

@@ -1910,6 +1910,17 @@ def exec_lock_text(info):
 
 
 # ================= STATE / ACTION =================
+def auto_entry_flow_ready(checks, auto_entry=None):
+    if not auto_entry:
+        return False
+    trend_ok = bool(checks.get("trend"))
+    htf_ok = bool(checks.get("htf"))
+    ob_ok = bool(checks.get("orderbook"))
+    oi_ok = bool(checks.get("oi"))
+    prem_ok = bool(checks.get("premium"))
+    return trend_ok and htf_ok and ob_ok and (oi_ok or prem_ok)
+
+
 def state_text(side, checks, traps, reversal=None, auto_entry=None):
     trend_ok = checks["trend"]
     htf_ok = checks["htf"]
@@ -1918,7 +1929,9 @@ def state_text(side, checks, traps, reversal=None, auto_entry=None):
     prem_ok = checks["premium"]
 
     if auto_entry:
-        return f"{auto_entry['label']} → enter {auto_entry['side']}"
+        if auto_entry_flow_ready(checks, auto_entry):
+            return f"{auto_entry['label']} → enter {auto_entry['side']}"
+        return f"{auto_entry['label']} → setup forming {auto_entry['side']}"
     if reversal:
         return f"{reversal['label']} → watch {reversal['side']}"
     if all(checks.values()):
@@ -1938,7 +1951,9 @@ def state_text(side, checks, traps, reversal=None, auto_entry=None):
 
 def action_now_text(side, quality, checks, prev, traps, reversal=None, auto_entry=None):
     if auto_entry:
-        return f"ENTER {auto_entry['side']} — follow-through confirmed"
+        if auto_entry_flow_ready(checks, auto_entry):
+            return f"ENTER {auto_entry['side']} — follow-through confirmed"
+        return f"PREPARE {auto_entry['side']} — wait flow confirm"
     if reversal:
         return f"WATCH {reversal['side']} — trap complete, wait follow-through"
     if traps:
@@ -1959,7 +1974,9 @@ def action_now_text(side, quality, checks, prev, traps, reversal=None, auto_entr
 def final_summary_text(side, quality, checks, traps, reversal=None, auto_entry=None):
     failed = [k for k, v in checks.items() if not v]
     if auto_entry:
-        return f"{auto_entry['label']} | {' + '.join(auto_entry['reasons'])}"
+        if auto_entry_flow_ready(checks, auto_entry):
+            return f"{auto_entry['label']} | {' + '.join(auto_entry['reasons'])}"
+        return f"{auto_entry['label']} | setup forming only | wait flow confirm"
     if reversal:
         return f"{reversal['label']} | {' + '.join(reversal['reasons'])}"
     if quality == "A+":
@@ -1975,9 +1992,11 @@ def final_summary_text(side, quality, checks, traps, reversal=None, auto_entry=N
     return "No trade | bias may exist but setup still weak"
 
 
-def decision_text(side, quality, reversal=None, auto_entry=None):
+def decision_text(side, quality, reversal=None, auto_entry=None, checks=None):
     if auto_entry:
-        return f"ENTER {auto_entry['side']}"
+        if auto_entry_flow_ready(checks or {}, auto_entry):
+            return f"ENTER {auto_entry['side']}"
+        return f"PREPARE {auto_entry['side']}"
     if reversal:
         return f"WATCH {reversal['side']}"
     return "STAND ASIDE" if quality != "A+" else f"ENTER {side}"
@@ -2278,7 +2297,7 @@ def hard_decision_engine(side, checks, prev, quality=None, entry_filter=None, co
     bias_ok = trend_ok and htf_ok
     structure_ok = break_ok or has_reversal or has_auto_entry
     flow_ok = ob_ok and (oi_ok or prem_ok)
-    execution_ok = filter_ok or commit_ok or has_auto_entry
+    execution_ok = filter_ok or commit_ok or (has_auto_entry and bias_ok and flow_ok)
 
     if bias_ok and structure_ok and flow_ok and execution_ok:
         decision = "ENTER"
@@ -2328,7 +2347,7 @@ def entry_checklist_5s(side, checks, prev, quality=None, entry_filter=None, comm
     action_emoji = "🎯" if decision["decision"] == "ENTER" else "🟡" if decision["decision"] == "PREPARE" else "🧘"
 
     if auto_entry:
-        break_text = "auto-entry confirmed"
+        break_text = "auto-entry confirmed" if (decision["flow_ok"] and decision["execution_ok"]) else "auto-entry structure found"
     elif reversal:
         break_text = "reversal confirmed"
     elif decision["structure_ok"]:
