@@ -1,6 +1,7 @@
 
 import atexit
 import hashlib
+import html
 import json
 import os
 import queue
