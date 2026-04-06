@@ -1,0 +1,6 @@
+V9.4.2 = LIVE LOG PANEL ONLY REFRESH
+- stop full-page auto refresh
+- keep SSR first render
+- refresh only live log panel via lightweight fetch polling
+- preserve anti-cache headers on log API
+- selected log file continues to update without reloading entire dashboard

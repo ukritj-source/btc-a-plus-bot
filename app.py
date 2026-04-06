@@ -548,6 +548,7 @@ def dashboard():
         "log_files": log_files,
         "selected_file": selected_file,
         "refresh_seconds": refresh_seconds,
+        "log_poll_seconds": refresh_seconds,
     }
     initial_logs = {
         "file": selected_file,
@@ -569,7 +570,6 @@ def dashboard():
         refresh_seconds=refresh_seconds,
     )
     response = Response(html_out)
-    response.headers["Refresh"] = str(refresh_seconds)
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
@@ -602,14 +602,22 @@ def api_status():
 def api_logs():
     latest = latest_log_file()
     lines = tail_file(latest) if latest else list(supervisor.buffer)
-    return jsonify({"file": latest.name if latest else None, "lines": lines[-TAIL_LINES:]})
+    response = jsonify({"file": latest.name if latest else None, "lines": lines[-TAIL_LINES:]})
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/api/logs/<path:filename>")
 def api_logs_by_name(filename: str):
     path = LOG_DIR / filename
     lines = tail_file(path)
-    return jsonify({"file": filename, "lines": lines[-TAIL_LINES:]})
+    response = jsonify({"file": filename, "lines": lines[-TAIL_LINES:]})
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/download/<path:filename>")
@@ -623,8 +631,7 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="{{ refresh_seconds }}">
-  <title>BTC Bot V9.4 SSR Dashboard</title>
+  <title>BTC Bot V9.4.2 Smart Log Panel Dashboard</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1020; color:#e7ecf5; margin:0; }
     .wrap { max-width: 1440px; margin: 0 auto; padding: 20px; }
@@ -647,8 +654,8 @@ TEMPLATE = """
 </head>
 <body>
 <div class="wrap">
-  <h1>BTC Bot V9.4 SSR Dashboard</h1>
-  <p class="muted">Server-side rendered dashboard only + meta refresh every {{ refresh_seconds }}s + Telegram alert only</p>
+  <h1>BTC Bot V9.4.2 Smart Log Panel Dashboard</h1>
+  <p class="muted">SSR dashboard + lightweight live-log panel refresh only + Telegram alert only</p>
   <div class="grid">
     <div class="stack">
       <div class="card">
@@ -679,11 +686,43 @@ TEMPLATE = """
       </div>
     </div>
     <div class="card">
-      <div class="row"><h3>Live Log</h3><span class="badge ok">auto refresh {{ refresh_seconds }}s</span></div>
+      <div class="row"><h3>Live Log</h3><span class="badge ok">panel refresh {{ refresh_seconds }}s</span></div>
       <div id="logbox" class="logbox">{{ initial_log_text }}</div>
     </div>
   </div>
 </div>
+<script>
+(function () {
+  const logbox = document.getElementById("logbox");
+  const selectedFile = {{ selected_file|tojson }};
+  const pollMs = Math.max(1000, {{ refresh_seconds|int }} * 1000);
+
+  function isNearBottom(el) {
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) < 80;
+  }
+
+  async function refreshLogPanel() {
+    const nearBottom = isNearBottom(logbox);
+    const url = selectedFile ? `/api/logs/${encodeURIComponent(selectedFile)}?t=${Date.now()}` : `/api/logs?t=${Date.now()}`;
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const nextText = (data.lines || []).join("\n");
+      if (logbox.textContent !== nextText) {
+        logbox.textContent = nextText;
+        if (nearBottom) {
+          logbox.scrollTop = logbox.scrollHeight;
+        }
+      }
+    } catch (e) {
+      // keep current log view if polling fails
+    }
+  }
+
+  setInterval(refreshLogPanel, pollMs);
+})();
+</script>
 </body>
 </html>
 """
