@@ -2996,6 +2996,7 @@ def should_print_live_log(side, bias_text, checks, extra, cur, prev, traps, reve
 
 # ================= MAIN =================
 def run_engine_forever():
+    global _last_closed_candle_logged, _last_short_trap, _last_long_trap, _last_long_reversal, _last_short_reversal
     apply_mode_profile(MODE_PROFILE)
     setup_file_logging()
     print(f"[{now()}] BOT STARTED | V9.1 EARLY EXPANSION / SHORT SQUEEZE SYNC ENGINE | MODE={MODE_PROFILE}")
