@@ -1,0 +1,1 @@
+V10.0.2 fixes Railway runtime crash by declaring global state variables used in run_engine_forever() (_last_closed_candle_logged, trap/reversal memory) without changing core analysis logic.

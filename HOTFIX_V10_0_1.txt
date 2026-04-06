@@ -1,12 +1,1 @@
-V10.0.1 Railway-safe
-
-What changed
-- Wrapped engine startup in run_engine_forever() so importing engine no longer auto-blocks the web process.
-- Added Railway-safe Flask app with / and /health.
-- App starts engine in a background daemon thread for web deployments.
-- Procfile changed back to web mode for Railway compatibility.
-- railway.toml keeps gunicorn web start and healthcheck /health.
-
-Core logic status
-- Trading analysis core remains unchanged.
-- Changes only affect process boot/deployment flow.
+V10.0.1 Railway-safe: web shell + background engine thread + /health endpoint for Railway healthcheck.
