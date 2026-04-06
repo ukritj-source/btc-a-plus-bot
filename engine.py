@@ -2246,6 +2246,53 @@ def fmt_targets(targets):
     return f"near={fmt_price(targets.get('near'))} | main={fmt_price(targets.get('main'))} | stretch={fmt_price(targets.get('stretch'))}"
 
 
+
+def checklist_mark(ok):
+    return "✅" if ok else "❌"
+
+
+def entry_checklist_5s(side, checks, prev, quality=None, entry_filter=None, commit_info=None, reversal=None, auto_entry=None):
+    checks = checks or {}
+    trend_ok = bool(checks.get("trend"))
+    htf_ok = bool(checks.get("htf"))
+    break_ok = bool(checks.get("break"))
+    ob_ok = bool(checks.get("orderbook"))
+    oi_ok = bool(checks.get("oi"))
+    prem_ok = bool(checks.get("premium"))
+    filter_ok = bool(entry_filter and entry_filter.get("passed"))
+    commit_ok = bool(commit_info and commit_info.get("commit"))
+    has_reversal = bool(reversal)
+    has_auto_entry = bool(auto_entry)
+    quality = quality or signal_quality(checks)
+
+    trigger_hint = price_trigger_hint(side, prev, reversal, auto_entry)
+    structure_ok = break_ok or has_reversal or has_auto_entry
+    flow_ok = ob_ok and (oi_ok or prem_ok)
+    execution_ok = filter_ok or commit_ok or has_auto_entry
+
+    if has_auto_entry:
+        verdict = f"ENTER {auto_entry.get('side', side)}"
+    elif execution_ok and trend_ok and htf_ok and structure_ok and flow_ok:
+        verdict = f"ENTER {side}"
+    elif has_reversal and trend_ok and htf_ok:
+        verdict = f"WATCH {reversal.get('side', side)}"
+    elif trend_ok and htf_ok:
+        verdict = f"WAIT BREAK — {trigger_hint}"
+    elif htf_ok:
+        verdict = "WAIT LTF ALIGN"
+    else:
+        verdict = "STAND ASIDE"
+
+    return (
+        "\n📋 ENTRY CHECKLIST 5 วิ\n"
+        f"1) Bias {checklist_mark(trend_ok and htf_ok)} trend/htf\n"
+        f"2) Break {checklist_mark(structure_ok)} {('reversal/auto-entry confirmed' if (has_reversal or has_auto_entry) else trigger_hint)}\n"
+        f"3) Flow {checklist_mark(flow_ok)} orderbook + (oi/premium)\n"
+        f"4) Commit {checklist_mark(execution_ok)} {commit_text(commit_info)}\n"
+        f"5) Action {'🎯' if verdict.startswith('ENTER') else '👀' if verdict.startswith('WATCH') or verdict.startswith('WAIT') else '🧘'} {verdict}\n"
+        f"grade: {quality}"
+    )
+
 def sniper_mode_summary(side, true_commit=None, auto_entry=None, entry_filter=None, commit_info=None, plan=None, cur=None, prev=None, checks=None, traps=None, fake_move=None, flip_setup=None):
     checks = checks or {}
     traps = traps or []
@@ -2831,6 +2878,8 @@ def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=N
     prob = probability_score(side, checks, traps, reversal, auto_entry, extra.get("ob"), extra.get("oi"), extra.get("premium"))
     targets = liquidity_targets(side, prev, _last_short_trap if side == "SHORT" else _last_long_trap, reversal or auto_entry, extra.get("atr"))
     target_txt = fmt_targets(targets)
+    quality = signal_quality(checks)
+    checklist = entry_checklist_5s(side, checks, prev, quality, entry_filter, commit_info, reversal, auto_entry)
     if auto_entry:
         return (
             f"🚀 {auto_entry['label']} {SYMBOL}\n"
@@ -2841,7 +2890,8 @@ def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=N
             f"commit: {commit_text(commit_info)}\n"
             f"probability: {prob}/100\n"
             f"targets: {target_txt}\n"
-            f"why: {' + '.join(auto_entry['reasons'])}"
+            f"why: {' + ' .join(auto_entry['reasons'])}"
+            f"{checklist}"
         )
     if reversal:
         return (
@@ -2850,7 +2900,8 @@ def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=N
             f"price: {fmt_price(price)}\n"
             f"probability: {prob}/100\n"
             f"targets: {target_txt}\n"
-            f"why: {' + '.join(reversal['reasons'])}"
+            f"why: {' + ' .join(reversal['reasons'])}"
+            f"{checklist}"
         )
     if traps:
         return (
@@ -2859,6 +2910,7 @@ def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=N
             f"price: {fmt_price(price)}\n"
             f"probability: {prob}/100\n"
             f"warning: {easy_trap_warning(traps)}"
+            f"{checklist}"
         )
     return (
         f"🔥 A+ {side} {SYMBOL}\n"
@@ -2866,8 +2918,8 @@ def build_alert_message(side, price, checks, cur, prev, extra, traps, reversal=N
         f"price: {fmt_price(price)}\n"
         f"probability: {prob}/100\n"
         f"targets: {target_txt}"
+        f"{checklist}"
     )
-
 
 def build_special_event_message(tag, cur, prev, extra, detail, side=None, checks=None, traps=None):
     checks = checks or {}
@@ -2883,10 +2935,11 @@ def build_special_event_message(tag, cur, prev, extra, detail, side=None, checks
         "LIVE": "📡 LIVE UPDATE",
     }.get(tag, f"📣 {tag}")
     reasons = detail.get("reasons") or []
-    why = detail.get("why") or detail.get("reason") or (' + '.join(reasons) if reasons else '-')
+    why = detail.get("why") or detail.get("reason") or (' + ' .join(reasons) if reasons else '-')
     trigger = detail.get("entry_hint") or detail.get("label") or "watch reaction"
     reclaim = detail.get("reclaim_level")
     reclaim_txt = fmt_price(reclaim) if reclaim is not None else "n/a"
+    checklist = entry_checklist_5s(side_ctx, checks, prev, signal_quality(checks), None, None, None, None)
     return (
         f"{headline} {SYMBOL}\n"
         f"time: {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])}\n"
@@ -2897,8 +2950,8 @@ def build_special_event_message(tag, cur, prev, extra, detail, side=None, checks
         f"reclaim/trigger: {reclaim_txt} | {trigger}\n"
         f"ob={fmt_num(extra.get('ob'),4)} | oi={fmt_pct(extra.get('oi'),4)} | premium={fmt_num(extra.get('premium'),8)}\n"
         f"why: {why}"
+        f"{checklist}"
     )
-
 
 def maybe_send_live_summary(side, cur, prev, checks, extra, traps, reversal=None, auto_entry=None, fake_move=None, smash=None, probable_smash=None, flip_setup=None, squeeze_sync=None):
     global _last_live_summary_ts
@@ -2913,6 +2966,7 @@ def maybe_send_live_summary(side, cur, prev, checks, extra, traps, reversal=None
         return
     _last_live_summary_ts = now_ts
     phase = live_phase_text(side, traps, reversal, auto_entry, fake_move, checks, cur=cur, prev=prev, ob=extra.get("ob"), oi_v=extra.get("oi"), prem=extra.get("premium"), atr_v=extra.get("atr"))
+    quality = signal_quality(checks)
     live_msg = (
         f"📡 LIVE SNAPSHOT {SYMBOL}\n"
         f"time: {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])}\n"
@@ -2920,11 +2974,11 @@ def maybe_send_live_summary(side, cur, prev, checks, extra, traps, reversal=None
         f"bias: {side} | phase: {phase}\n"
         f"checks: {compact_reason(checks)}\n"
         f"state: {state_text(side, checks, traps, reversal, auto_entry)}\n"
-        f"action: {action_now_text(side, signal_quality(checks), checks, prev, traps, reversal, auto_entry)}\n"
+        f"action: {action_now_text(side, quality, checks, prev, traps, reversal, auto_entry)}\n"
         f"raw: ob={fmt_num(extra.get('ob'),4)} | oi={fmt_pct(extra.get('oi'),4)} | premium={fmt_num(extra.get('premium'),8)}"
+        f"{entry_checklist_5s(side, checks, prev, quality, None, None, reversal, auto_entry)}"
     )
     send_telegram(live_msg)
-
 
 def should_print_live_log(side, bias_text, checks, extra, cur, prev, traps, reversal=None, auto_entry=None, fake_move=None, smash=None, probable_smash=None, probe_entry=None, distribution_zone=None):
     global _last_live_log_ts, _last_live_state_signature, _last_live_state_print_ts
