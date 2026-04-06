@@ -1,8 +1,10 @@
+
 import atexit
 import hashlib
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -28,10 +30,8 @@ TAIL_LINES = int(os.getenv("TAIL_LINES", "400"))
 MAX_BUFFER_LINES = int(os.getenv("MAX_BUFFER_LINES", "1000"))
 TZ_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "7"))
 
-# Backup config
 ENABLE_BACKUP = os.getenv("ENABLE_BACKUP", "true").lower() == "true"
 ENABLE_TELEGRAM_BACKUP = os.getenv("ENABLE_TELEGRAM_BACKUP", "true").lower() == "true"
-ENABLE_GDRIVE_BACKUP = False
 BACKUP_INTERVAL_SEC = int(os.getenv("BACKUP_INTERVAL_SEC", "300"))
 TELEGRAM_BACKUP_CHAT_ID = os.getenv("TELEGRAM_BACKUP_CHAT_ID") or os.getenv("CHAT_ID", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -39,22 +39,9 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-def ensure_bootstrap_files() -> None:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if not STATE_FILE.exists():
-        STATE_FILE.write_text(json.dumps({"bootstrapped_at": datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d %H:%M:%S"), "status": "bootstrapped"}, ensure_ascii=False, indent=2), encoding="utf-8")
-    today = datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d")
-    log_file = LOG_DIR / f"{today}.log"
-    if not log_file.exists():
-        log_file.write_text("", encoding="utf-8")
 
-ensure_bootstrap_files()
-
-# Ensure engine shares the same state file path
-os.environ["STATE_FILE"] = str(STATE_FILE)
-
-app = Flask(__name__)
+def local_now_text() -> str:
+    return datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def iso_time(ts: Optional[float]) -> Optional[str]:
@@ -63,10 +50,27 @@ def iso_time(ts: Optional[float]) -> Optional[str]:
     return datetime.utcfromtimestamp(ts + TZ_OFFSET * 3600).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def timestamp_text() -> str:
-    return datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d %H:%M:%S")
+def ensure_bootstrap_files() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not STATE_FILE.exists():
+        STATE_FILE.write_text(
+            json.dumps(
+                {"bootstrapped_at": local_now_text(), "status": "bootstrapped", "version": "V9.3"},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    today = datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d")
+    log_file = LOG_DIR / f"{today}.log"
+    if not log_file.exists():
+        log_file.write_text("", encoding="utf-8")
 
 
+ensure_bootstrap_files()
+os.environ["STATE_FILE"] = str(STATE_FILE)
+app = Flask(__name__)
 BACKUP_MANAGER_HOOK = None
 
 
@@ -78,6 +82,51 @@ def md5_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def latest_log_file() -> Optional[Path]:
+    files = sorted(LOG_DIR.glob("*.log"))
+    return files[-1] if files else None
+
+
+def tail_file(path: Optional[Path], max_lines: int = TAIL_LINES) -> List[str]:
+    if not path or not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        return [line.rstrip("\n") for line in deque(f, maxlen=max_lines)]
+
+
+def read_state() -> Dict:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def summarize_log(lines: List[str]) -> Dict:
+    text = "\n".join(lines[-120:])
+    def last_match(pattern: str) -> Optional[str]:
+        matches = re.findall(pattern, text, flags=re.MULTILINE)
+        return matches[-1] if matches else None
+
+    bias = last_match(r"BIAS\s*:\s*(.+)")
+    phase = last_match(r"PHASE\s*:\s*(.+)")
+    verdict = last_match(r"VERDICT\s*:\s*(.+)")
+    quick = last_match(r"QUICK TAKE\s*:\s*(.+)")
+    event = last_match(r"EVENT\s*:\s*(.+)")
+    grade = last_match(r"GRADE\s*:\s*(.+)")
+    trigger = last_match(r"TRIGGER\s*:\s*(.+)")
+    return {
+        "bias": bias,
+        "phase": phase,
+        "verdict": verdict,
+        "quick_take": quick,
+        "event": event,
+        "grade": grade,
+        "trigger": trigger,
+    }
+
+
 class BotSupervisor:
     def __init__(self) -> None:
         self.process: Optional[subprocess.Popen] = None
@@ -87,29 +136,16 @@ class BotSupervisor:
         self.last_line_at: Optional[float] = None
         self.last_start_at: Optional[float] = None
         self.last_exit_code: Optional[int] = None
-        self.restart_count: int = 0
-        self.status: str = "idle"
+        self.restart_count = 0
+        self.status = "idle"
         self.subscribers: List[queue.Queue] = []
 
     def _today_file(self) -> Path:
-        dt = datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d")
-        return LOG_DIR / f"{dt}.log"
-
-    def _broadcast(self, line: str) -> None:
-        dead: List[queue.Queue] = []
-        for q in self.subscribers:
-            try:
-                q.put_nowait(line)
-            except Exception:
-                dead.append(q)
-        for q in dead:
-            try:
-                self.subscribers.remove(q)
-            except ValueError:
-                pass
+        today = datetime.utcfromtimestamp(time.time() + TZ_OFFSET * 3600).strftime("%Y-%m-%d")
+        return LOG_DIR / f"{today}.log"
 
     def subscribe(self) -> queue.Queue:
-        q: queue.Queue = queue.Queue(maxsize=200)
+        q: queue.Queue = queue.Queue(maxsize=300)
         self.subscribers.append(q)
         return q
 
@@ -119,6 +155,16 @@ class BotSupervisor:
         except ValueError:
             pass
 
+    def _broadcast(self, line: str) -> None:
+        dead = []
+        for q in self.subscribers:
+            try:
+                q.put_nowait(line)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            self.unsubscribe(q)
+
     def _write_line(self, line: str) -> None:
         self.buffer.append(line)
         self.last_line_at = time.time()
@@ -126,8 +172,12 @@ class BotSupervisor:
         logfile.parent.mkdir(parents=True, exist_ok=True)
         with logfile.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
-        if not STATE_FILE.exists():
-            STATE_FILE.write_text(json.dumps({"last_log_line_at": timestamp_text(), "status": "running"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            state = read_state()
+            state.update({"last_log_line_at": local_now_text(), "status": self.status or "running"})
+            STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
         self._broadcast(line)
         hook = globals().get("BACKUP_MANAGER_HOOK")
         if hook is not None:
@@ -153,28 +203,25 @@ class BotSupervisor:
                 env=env,
             )
             self.status = "running"
-            self._write_line(f"[{timestamp_text()}] supervisor: started bot pid={self.process.pid}")
-
+            self._write_line(f"[{local_now_text()}] supervisor: started bot pid={self.process.pid}")
             assert self.process.stdout is not None
             for raw in self.process.stdout:
                 if self.stop_event.is_set():
                     break
                 self._write_line(raw.rstrip("\n"))
-
             code = self.process.wait()
             self.last_exit_code = code
             if self.stop_event.is_set():
                 self.status = "stopped"
-                self._write_line(f"[{timestamp_text()}] supervisor: bot stopped gracefully code={code}")
+                self._write_line(f"[{local_now_text()}] supervisor: bot stopped gracefully code={code}")
                 break
-
             self.status = "crashed" if code else "stopped"
-            self._write_line(f"[{timestamp_text()}] supervisor: bot exited code={code}")
+            self._write_line(f"[{local_now_text()}] supervisor: bot exited code={code}")
             if not AUTO_RESTART:
                 break
             self.restart_count += 1
             self.status = "restarting"
-            self._write_line(f"[{timestamp_text()}] supervisor: restarting in {BOT_RESTART_DELAY_SEC}s")
+            self._write_line(f"[{local_now_text()}] supervisor: restarting in {BOT_RESTART_DELAY_SEC}s")
             time.sleep(BOT_RESTART_DELAY_SEC)
 
     def start(self) -> None:
@@ -214,9 +261,7 @@ class BackupManager:
     def __init__(self) -> None:
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
-        self.lock = threading.Lock()
         self.wake_event = threading.Event()
-        self.pending_reasons: Set[str] = set()
         self.state = self._load_state()
         self.status: Dict = {
             "running": False,
@@ -224,34 +269,37 @@ class BackupManager:
             "last_success_at": None,
             "last_error": None,
             "last_trigger_reason": None,
-            "telegram": {"enabled": ENABLE_TELEGRAM_BACKUP, "last_success_at": None, "last_file": None, "last_error": None},
+            "telegram": {
+                "enabled": ENABLE_TELEGRAM_BACKUP,
+                "last_success_at": None,
+                "last_file": None,
+                "last_error": None,
+            },
         }
 
     def trigger_now(self, reason: str = "manual") -> None:
-        self.pending_reasons.add(reason)
         self.status["last_trigger_reason"] = reason
         self.wake_event.set()
 
     def _load_state(self) -> Dict:
         if not BACKUP_STATE_FILE.exists():
-            return {"telegram": {}, "gdrive": {}}
+            return {"telegram": {}}
         try:
             return json.loads(BACKUP_STATE_FILE.read_text(encoding="utf-8"))
         except Exception:
-            return {"telegram": {}, "gdrive": {}}
+            return {"telegram": {}}
 
     def _save_state(self) -> None:
         BACKUP_STATE_FILE.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _mark_success(self, channel: str, path: Path) -> None:
         now = time.time()
-        digest = md5_file(path)
         info = {
             "path": str(path),
             "name": path.name,
             "size": path.stat().st_size,
             "mtime": path.stat().st_mtime,
-            "md5": digest,
+            "md5": md5_file(path),
             "sent_at": now,
         }
         self.state.setdefault(channel, {})[str(path)] = info
@@ -261,19 +309,10 @@ class BackupManager:
         self.status[channel]["last_error"] = None
         self.status["last_success_at"] = iso_time(now)
 
-    def _mark_error(self, channel: str, exc: Exception) -> None:
-        msg = str(exc)
-        self.status[channel]["last_error"] = msg
-        self.status["last_error"] = msg
-
     def _should_send(self, channel: str, path: Path) -> bool:
         if not path.exists() or path.stat().st_size == 0:
             return False
-        current = {
-            "size": path.stat().st_size,
-            "mtime": path.stat().st_mtime,
-            "md5": md5_file(path),
-        }
+        current = {"size": path.stat().st_size, "mtime": path.stat().st_mtime, "md5": md5_file(path)}
         prev = self.state.get(channel, {}).get(str(path), {})
         return any(prev.get(k) != current[k] for k in current)
 
@@ -291,7 +330,7 @@ class BackupManager:
         r.raise_for_status()
 
     def _collect_files(self) -> List[Path]:
-        files: List[Path] = []
+        files = []
         latest = latest_log_file()
         if latest:
             files.append(latest)
@@ -301,16 +340,14 @@ class BackupManager:
 
     def _cycle(self) -> None:
         ensure_bootstrap_files()
-        files = self._collect_files()
-        for path in files:
+        for path in self._collect_files():
             if ENABLE_TELEGRAM_BACKUP and self._should_send("telegram", path):
-                caption = f"BTC backup | {path.name} | {timestamp_text()}"
-                self._telegram_send_document(path, caption)
+                self._telegram_send_document(path, f"BTC backup | {path.name} | {local_now_text()}")
                 self._mark_success("telegram", path)
 
     def _run_loop(self) -> None:
         self.status["running"] = True
-        self.trigger_now(reason="startup")
+        self.trigger_now("startup")
         while not self.stop_event.is_set():
             self.status["last_cycle_at"] = iso_time(time.time())
             try:
@@ -318,6 +355,7 @@ class BackupManager:
                 self.status["last_error"] = None
             except Exception as exc:
                 self.status["last_error"] = str(exc)
+                self.status["telegram"]["last_error"] = str(exc)
             self.wake_event.clear()
             self.wake_event.wait(BACKUP_INTERVAL_SEC)
         self.status["running"] = False
@@ -344,27 +382,6 @@ backup_manager = BackupManager()
 BACKUP_MANAGER_HOOK = backup_manager
 
 
-def tail_file(path: Optional[Path], max_lines: int = TAIL_LINES) -> List[str]:
-    if not path or not path.exists():
-        return []
-    with path.open("r", encoding="utf-8", errors="replace") as f:
-        return [line.rstrip("\n") for line in deque(f, maxlen=max_lines)]
-
-
-def latest_log_file() -> Optional[Path]:
-    files = sorted(LOG_DIR.glob("*.log"))
-    return files[-1] if files else None
-
-
-def read_state() -> Dict:
-    if not STATE_FILE.exists():
-        return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
 @app.route("/")
 def dashboard():
     return render_template_string(TEMPLATE)
@@ -372,22 +389,30 @@ def dashboard():
 
 @app.route("/health")
 def health():
-    return jsonify({"ok": True, **supervisor.health(), "backup": backup_manager.health()})
+    latest = latest_log_file()
+    lines = tail_file(latest, 120)
+    return jsonify({
+        "ok": True,
+        **supervisor.health(),
+        "backup": backup_manager.health(),
+        "latest_log_file": latest.name if latest else None,
+        "summary": summarize_log(lines),
+    })
 
 
 @app.route("/api/status")
 def api_status():
     state = read_state()
     latest = latest_log_file()
-    return jsonify(
-        {
-            "bot": supervisor.health(),
-            "backup": backup_manager.health(),
-            "state": state,
-            "latest_log_file": latest.name if latest else None,
-            "log_files": [p.name for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:14]],
-        }
-    )
+    lines = tail_file(latest, 120)
+    return jsonify({
+        "bot": supervisor.health(),
+        "backup": backup_manager.health(),
+        "state": state,
+        "summary": summarize_log(lines),
+        "latest_log_file": latest.name if latest else None,
+        "log_files": [p.name for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:30]],
+    })
 
 
 @app.route("/api/logs")
@@ -415,19 +440,24 @@ def stream():
 
     def event_stream():
         try:
-            bootstrap = list(supervisor.buffer)[-100:]
+            bootstrap = list(supervisor.buffer)[-150:]
             for line in bootstrap:
                 yield f"data: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
             while True:
                 try:
-                    line = q.get(timeout=15)
+                    line = q.get(timeout=10)
                     yield f"data: {json.dumps({'line': line}, ensure_ascii=False)}\n\n"
                 except Exception:
                     yield ": keep-alive\n\n"
         finally:
             supervisor.unsubscribe(q)
 
-    return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return Response(stream_with_context(event_stream()), mimetype="text/event-stream", headers=headers)
 
 
 TEMPLATE = """
@@ -436,11 +466,11 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BTC Bot V9.2.2 Telegram Backup Dashboard</title>
+  <title>BTC Bot V9.3 Smart Dashboard</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1020; color:#e7ecf5; margin:0; }
-    .wrap { max-width: 1440px; margin: 0 auto; padding: 20px; }
-    .grid { display:grid; grid-template-columns: 360px 1fr; gap:16px; }
+    .wrap { max-width: 1500px; margin: 0 auto; padding: 20px; }
+    .grid { display:grid; grid-template-columns: 380px 1fr; gap:16px; }
     .card { background:#131a2e; border:1px solid #24304d; border-radius:16px; padding:16px; box-shadow: 0 10px 25px rgba(0,0,0,.25); }
     h1,h2,h3 { margin: 0 0 12px 0; }
     .muted { color:#93a1bf; font-size: 14px; }
@@ -448,7 +478,11 @@ TEMPLATE = """
     .ok { color:#7CFC9A; }
     .warn { color:#ffd166; }
     .err { color:#ff7b7b; }
-    .logbox { background:#090d19; color:#d9e4ff; min-height:72vh; white-space:pre-wrap; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.4; padding:16px; border-radius:12px; border:1px solid #1f2942; }
+    .summary-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; }
+    .mini { background:#0d1324; border:1px solid #24304d; border-radius:12px; padding:12px; min-height:72px; }
+    .mini .label { font-size:12px; color:#93a1bf; margin-bottom:6px; }
+    .mini .value { font-size:15px; font-weight:700; word-break:break-word; }
+    .logbox { background:#090d19; color:#d9e4ff; min-height:72vh; white-space:pre-wrap; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.42; padding:16px; border-radius:12px; border:1px solid #1f2942; }
     .row { display:flex; justify-content:space-between; gap:10px; margin:8px 0; }
     .stack > * + * { margin-top: 10px; }
     select { width:100%; background:#0d1324; color:#e7ecf5; border:1px solid #324269; border-radius:10px; padding:10px; }
@@ -458,8 +492,8 @@ TEMPLATE = """
 </head>
 <body>
 <div class="wrap">
-  <h1>BTC Bot V9.2.2 Telegram Backup Dashboard</h1>
-  <p class="muted">Live log + daily log files + bot supervisor + backup status (Telegram only)</p>
+  <h1>BTC Bot V9.3 Smart Dashboard</h1>
+  <p class="muted">Live log + daily log files + bot supervisor + backup status + quick market summary</p>
   <div class="grid">
     <div class="stack">
       <div class="card">
@@ -469,6 +503,10 @@ TEMPLATE = """
       <div class="card">
         <h3>Backup Status</h3>
         <div id="backup"></div>
+      </div>
+      <div class="card">
+        <h3>Quick Summary</h3>
+        <div id="summary" class="summary-grid"></div>
       </div>
       <div class="card">
         <h3>Daily Logs</h3>
@@ -491,10 +529,20 @@ const logbox = document.getElementById('logbox');
 const statusEl = document.getElementById('status');
 const backupEl = document.getElementById('backup');
 const stateEl = document.getElementById('state');
+const summaryEl = document.getElementById('summary');
 const fileSelect = document.getElementById('fileSelect');
 const downloadLink = document.getElementById('downloadLink');
 const streamBadge = document.getElementById('streamBadge');
 let currentFile = null;
+let lastRenderedBlob = '';
+let usingPolling = false;
+let es = null;
+
+async function jfetch(url) {
+  const r = await fetch(url, {cache: 'no-store'});
+  if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
+  return await r.json();
+}
 
 function renderStatus(data) {
   const bot = data.bot || {};
@@ -517,60 +565,125 @@ function renderStatus(data) {
     <div class="row"><span class="muted">telegram</span><strong class="${tg.last_error ? 'err' : 'ok'}">${tg.enabled ? 'enabled' : 'disabled'}</strong></div>
     <div class="row"><span class="muted">last file</span><strong>${tg.last_file || '-'}</strong></div>
     <div class="row"><span class="muted">last success</span><strong>${tg.last_success_at || '-'}</strong></div>
-    <div class="muted">${tg.last_error ? 'TG error: ' + tg.last_error : 'Telegram backup active'}</div>
+    <div class="muted">${tg.last_error ? ('TG error: ' + tg.last_error) : 'Telegram backup active'}</div>
   `;
 
   stateEl.innerHTML = `<pre>${JSON.stringify(data.state || {}, null, 2)}</pre>`;
   const files = data.log_files || [];
-  fileSelect.innerHTML = files.map(f => `<option value="${f}">${f}</option>`).join('');
+  fileSelect.innerHTML = files.length ? files.map(f => `<option value="${f}">${f}</option>`).join('') : '<option value="">No log files</option>';
   if (!currentFile && files.length) currentFile = files[0];
   fileSelect.value = currentFile || '';
   refreshDownload();
+  renderSummary(data.summary || {});
+}
+
+function renderSummary(s) {
+  const items = [
+    ['Bias', s.bias || '-'],
+    ['Phase', s.phase || '-'],
+    ['Grade', s.grade || '-'],
+    ['Event', s.event || '-'],
+    ['Verdict', s.verdict || '-'],
+    ['Trigger', s.trigger || '-'],
+  ];
+  summaryEl.innerHTML = items.map(([k,v]) => `<div class="mini"><div class="label">${k}</div><div class="value">${v}</div></div>`).join('');
 }
 
 function refreshDownload() {
-  if (!fileSelect.value) return;
+  if (!fileSelect.value) {
+    downloadLink.removeAttribute('href');
+    return;
+  }
   currentFile = fileSelect.value;
   downloadLink.href = `/download/${encodeURIComponent(currentFile)}`;
 }
 
+async function loadSelectedFile() {
+  if (!fileSelect.value) return;
+  const data = await jfetch(`/api/logs/${encodeURIComponent(fileSelect.value)}`);
+  const blob = (data.lines || []).join('\n');
+  logbox.textContent = blob;
+  lastRenderedBlob = blob;
+  logbox.scrollTop = logbox.scrollHeight;
+}
+
 fileSelect.addEventListener('change', async () => {
   refreshDownload();
-  const res = await fetch(`/api/logs/${encodeURIComponent(fileSelect.value)}`);
-  const data = await res.json();
-  logbox.textContent = (data.lines || []).join('\n');
-  logbox.scrollTop = logbox.scrollHeight;
+  await loadSelectedFile();
 });
 
 async function bootstrap() {
-  const status = await fetch('/api/status').then(r => r.json());
+  const status = await jfetch('/api/status');
   renderStatus(status);
-  const logs = await fetch('/api/logs').then(r => r.json());
-  logbox.textContent = (logs.lines || []).join('\n');
+  const logs = await jfetch('/api/logs');
+  const blob = (logs.lines || []).join('\n');
+  logbox.textContent = blob;
+  lastRenderedBlob = blob;
   logbox.scrollTop = logbox.scrollHeight;
 }
 
+function setBadge(text, cls='') {
+  streamBadge.textContent = text;
+  streamBadge.className = 'badge ' + cls;
+}
+
+async function pollingRefresh() {
+  try {
+    const logs = await jfetch(currentFile ? `/api/logs/${encodeURIComponent(currentFile)}` : '/api/logs');
+    const blob = (logs.lines || []).join('\n');
+    if (blob !== lastRenderedBlob) {
+      logbox.textContent = blob;
+      lastRenderedBlob = blob;
+      logbox.scrollTop = logbox.scrollHeight;
+    }
+    setBadge('polling', 'warn');
+  } catch (e) {
+    setBadge('offline', 'err');
+  }
+}
+
+function startPollingFallback() {
+  if (usingPolling) return;
+  usingPolling = true;
+  setBadge('polling', 'warn');
+  setInterval(pollingRefresh, 4000);
+}
+
 function connectStream() {
-  const es = new EventSource('/stream');
-  es.onopen = () => { streamBadge.textContent = 'live'; streamBadge.className = 'badge ok'; };
-  es.onmessage = (event) => {
-    const payload = JSON.parse(event.data);
-    logbox.textContent += (logbox.textContent ? '\n' : '') + payload.line;
-    logbox.scrollTop = logbox.scrollHeight;
-  };
-  es.onerror = () => {
-    streamBadge.textContent = 'reconnecting';
-    streamBadge.className = 'badge warn';
-  };
+  try {
+    es = new EventSource('/stream');
+    const failSafe = setTimeout(() => {
+      if (streamBadge.textContent === 'connecting...') startPollingFallback();
+    }, 5000);
+    es.onopen = () => {
+      clearTimeout(failSafe);
+      usingPolling = false;
+      setBadge('live', 'ok');
+    };
+    es.onmessage = (event) => {
+      const payload = JSON.parse(event.data);
+      logbox.textContent += (logbox.textContent ? '\n' : '') + payload.line;
+      lastRenderedBlob = logbox.textContent;
+      logbox.scrollTop = logbox.scrollHeight;
+    };
+    es.onerror = () => {
+      startPollingFallback();
+    };
+  } catch (e) {
+    startPollingFallback();
+  }
 }
 
 setInterval(async () => {
-  const status = await fetch('/api/status').then(r => r.json());
-  renderStatus(status);
+  try {
+    const status = await jfetch('/api/status');
+    renderStatus(status);
+  } catch (e) {
+    setBadge('offline', 'err');
+  }
 }, 10000);
 
-bootstrap();
-connectStream();
+bootstrap().then(connectStream).catch(() => startPollingFallback());
 </script>
 </body>
 </html>
