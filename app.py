@@ -33,6 +33,7 @@ TZ_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "7"))
 
 ENABLE_BACKUP = os.getenv("ENABLE_BACKUP", "true").lower() == "true"
 ENABLE_TELEGRAM_BACKUP = os.getenv("ENABLE_TELEGRAM_BACKUP", "true").lower() == "true"
+ENABLE_TELEGRAM_FILE_BACKUP = os.getenv("ENABLE_TELEGRAM_FILE_BACKUP", "false").lower() == "true"
 BACKUP_INTERVAL_SEC = int(os.getenv("BACKUP_INTERVAL_SEC", "300"))
 TELEGRAM_BACKUP_CHAT_ID = os.getenv("TELEGRAM_BACKUP_CHAT_ID") or os.getenv("CHAT_ID", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
@@ -271,7 +272,7 @@ class BackupManager:
             "last_error": None,
             "last_trigger_reason": None,
             "telegram": {
-                "enabled": ENABLE_TELEGRAM_BACKUP,
+                "enabled": (ENABLE_TELEGRAM_BACKUP and ENABLE_TELEGRAM_FILE_BACKUP),
                 "last_success_at": None,
                 "last_file": None,
                 "last_error": None,
@@ -341,8 +342,11 @@ class BackupManager:
 
     def _cycle(self) -> None:
         ensure_bootstrap_files()
+        if not (ENABLE_TELEGRAM_BACKUP and ENABLE_TELEGRAM_FILE_BACKUP):
+            self.status["telegram"]["last_error"] = None
+            return
         for path in self._collect_files():
-            if ENABLE_TELEGRAM_BACKUP and self._should_send("telegram", path):
+            if self._should_send("telegram", path):
                 self._telegram_send_document(path, f"BTC backup | {path.name} | {local_now_text()}")
                 self._mark_success("telegram", path)
 
@@ -443,7 +447,7 @@ def render_backup_status_html(backup: Dict) -> str:
         if k == "telegram":
             cls = "err" if tg.get("last_error") else "ok"
         out.append(f'<div class="row"><span class="muted">{html.escape(k)}</span><strong class="{cls}">{html.escape(v)}</strong></div>')
-    note = f'TG error: {tg.get("last_error")}' if tg.get("last_error") else "Telegram backup active"
+    note = f'TG error: {tg.get("last_error")}' if tg.get("last_error") else "Telegram file backup disabled"
     out.append(f'<div class="muted">{html.escape(note)}</div>')
     return "".join(out)
 
@@ -671,7 +675,7 @@ function renderStatus(data) {
     <div class="row"><span class="muted">telegram</span><strong class="${tg.last_error ? 'err' : 'ok'}">${escHtml(tg.enabled ? 'enabled' : 'disabled')}</strong></div>
     <div class="row"><span class="muted">last file</span><strong>${escHtml(tg.last_file || '-')}</strong></div>
     <div class="row"><span class="muted">last success</span><strong>${escHtml(tg.last_success_at || '-')}</strong></div>
-    <div class="muted">${escHtml(tg.last_error ? ('TG error: ' + tg.last_error) : 'Telegram backup active')}</div>
+    <div class="muted">${escHtml(tg.last_error ? ('TG error: ' + tg.last_error) : 'Telegram file backup disabled')}</div>
   `;
   stateEl.innerHTML = `<pre>${escHtml(JSON.stringify((data && data.state) || {}, null, 2))}</pre>`;
   const files = Array.isArray(data && data.log_files) ? data.log_files : [];
@@ -709,15 +713,19 @@ if (fileSelect) {
     await loadSelectedFile();
   });
 }
-async function refreshAll() {
+async function refreshAll(force=false) {
   try {
     const status = await jfetch('/api/status');
     renderStatus(status);
-    const target = currentFile ? `/api/logs/${encodeURIComponent(currentFile)}` : '/api/logs';
+    const latestFromStatus = (status && status.latest_log_file) || '';
+    const targetFile = (fileSelect && fileSelect.value) || currentFile || latestFromStatus || '';
+    const target = targetFile ? `/api/logs/${encodeURIComponent(targetFile)}` : '/api/logs';
     const logs = await jfetch(target);
     const blob = Array.isArray(logs.lines) ? logs.lines.join('\n') : '';
-    if (blob !== lastRenderedBlob) renderLogs(logs.lines || []);
-    setBadge('polling', 'warn');
+    if (force || blob !== lastRenderedBlob) {
+      renderLogs(logs.lines || []);
+    }
+    setBadge('auto refresh', 'ok');
   } catch (e) {
     setBadge('offline', 'err');
   }
@@ -726,12 +734,13 @@ async function refreshAll() {
   try {
     renderStatus(INITIAL_STATUS || {});
     renderLogs((INITIAL_LOGS && INITIAL_LOGS.lines) || []);
-    setBadge('polling', 'warn');
+    setBadge('auto refresh', 'ok');
   } catch (e) {
     setBadge('render error', 'err');
   }
+  setTimeout(() => { refreshAll(true); }, 600);
 })();
-setInterval(refreshAll, 4000);
+setInterval(() => { refreshAll(false); }, 2000);
 </script>
 </body>
 </html>

@@ -1,0 +1,5 @@
+V9.3.5 HOTFIX
+- Disabled Telegram file backup by default via ENABLE_TELEGRAM_FILE_BACKUP=false
+- Kept engine alert messages intact
+- Improved dashboard auto refresh polling every 2 seconds
+- Bootstrap refresh after page load
