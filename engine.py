@@ -2995,366 +2995,371 @@ def should_print_live_log(side, bias_text, checks, extra, cur, prev, traps, reve
 
 
 # ================= MAIN =================
-apply_mode_profile(MODE_PROFILE)
-print(f"[{now()}] BOT STARTED | V9.1 EARLY EXPANSION / SHORT SQUEEZE SYNC ENGINE | MODE={MODE_PROFILE}")
-load_state()
-setup_file_logging()
-startup_telegram_test()
+def run_engine_forever():
+    apply_mode_profile(MODE_PROFILE)
+    setup_file_logging()
+    print(f"[{now()}] BOT STARTED | V9.1 EARLY EXPANSION / SHORT SQUEEZE SYNC ENGINE | MODE={MODE_PROFILE}")
+    load_state()
+    startup_telegram_test()
 
-while True:
-    try:
-        candles = klines_closed(INTERVAL)
-        htf = klines_closed(HTF_INTERVAL)
+    while True:
+        try:
+            candles = klines_closed(INTERVAL)
+            htf = klines_closed(HTF_INTERVAL)
 
-        if len(candles) < 210 or len(htf) < 210:
-            print(f"[{now()}] Not enough candles")
+            if len(candles) < 210 or len(htf) < 210:
+                print(f"[{now()}] Not enough candles")
+                time.sleep(SLEEP)
+                continue
+
+            close = [x["c"] for x in candles]
+            close_h = [x["c"] for x in htf]
+
+            ef = ema(close, EMA_FAST)
+            em = ema(close, EMA_MID)
+            es = ema(close, EMA_SLOW)
+
+            efh = ema(close_h, EMA_FAST)
+            emh = ema(close_h, EMA_MID)
+            esh = ema(close_h, EMA_SLOW)
+
+            cur = candles[-1]
+            prev = candles[-2]
+
+            prune_memory(cur)
+
+            ob = orderbook()
+            oi_v = oi()
+            prem = premium()
+            atr_v = atr(candles)
+
+            trend_s = ef[-1] < em[-1] < es[-1]
+            trend_l = ef[-1] > em[-1] > es[-1]
+            htf_s = efh[-1] < emh[-1] < esh[-1]
+            htf_l = efh[-1] > emh[-1] > esh[-1]
+
+            bias_side = current_bias_side(trend_s, trend_l, htf_s, htf_l)
+            if update_bias_memory(cur, bias_side):
+                save_state(force=True)
+            maybe_reset_memory_on_bias_flip(cur, bias_side)
+
+            checks_s, checks_l = build_checks(cur, prev, trend_s, trend_l, htf_s, htf_l, ob, oi_v, prem)
+            extra = {
+                "ob": round(ob, 4),
+                "oi": oi_v,
+                "premium": prem,
+                "atr": atr_v,
+                "range": cur["h"] - cur["l"],
+                "body": abs(cur["c"] - cur["o"]),
+            }
+
+            if _last_closed_candle_logged != cur["close_time"]:
+                _last_closed_candle_logged = cur["close_time"]
+
+                traps_s = detect_short_trap(cur, prev, atr_v, ob, oi_v, prem, checks_s)
+                traps_l = detect_long_trap(cur, prev, atr_v, ob, oi_v, prem, checks_l)
+
+                if traps_s:
+                    _last_short_trap = remember_trap("SHORT", cur, prev, traps_s)
+                if traps_l:
+                    _last_long_trap = remember_trap("LONG", cur, prev, traps_l)
+
+                reversal = detect_reversal_after_short_trap(cur, ob, oi_v, prem, _last_short_trap)
+                if reversal and reversal["side"] == "LONG":
+                    _last_long_reversal = remember_reversal("LONG", cur, _last_short_trap, reversal["reasons"], reversal["entry_hint"], reversal["reclaim_level"])
+
+                if not reversal:
+                    reversal = detect_reversal_after_long_trap(cur, ob, oi_v, prem, _last_long_trap)
+                    if reversal and reversal["side"] == "SHORT":
+                        _last_short_reversal = remember_reversal("SHORT", cur, _last_long_trap, reversal["reasons"], reversal["entry_hint"], reversal["reclaim_level"])
+
+                auto_entry = None
+                if _last_long_reversal:
+                    auto_entry = detect_auto_entry_after_short_trap(cur, ob, oi_v, prem, atr_v, _last_long_reversal)
+                if not auto_entry and _last_short_reversal:
+                    auto_entry = detect_auto_entry_after_long_trap(cur, ob, oi_v, prem, atr_v, _last_short_reversal)
+
+                side, chosen_checks = choose_side(checks_s, checks_l)
+                bias_text = market_bias_text(trend_s, trend_l, htf_s, htf_l)
+                chosen_traps = traps_s if side == "SHORT" else traps_l
+                fake_pump = detect_fake_pump(cur, prev, atr_v, ob, oi_v, prem, trend_l, htf_s)
+                fake_dump = detect_fake_dump(cur, prev, atr_v, ob, oi_v, prem, trend_s, htf_l)
+                fake_move = fake_pump or fake_dump
+                flip_setup = detect_fake_dump_flip_long_setup(cur, prev, ob, oi_v, prem, atr_v, fake_move, checks_l)
+                expansion_long = detect_early_expansion_long(cur, prev, ob, oi_v, prem, atr_v, checks_l, fake_move, reversal)
+                squeeze_sync = detect_short_squeeze_sync(cur, prev, ob, oi_v, prem, atr_v, fake_move, checks_l, reversal, expansion_long)
+                if squeeze_sync and not reversal:
+                    reversal = {
+                        "side": "LONG",
+                        "label": squeeze_sync["label"],
+                        "reasons": squeeze_sync["reasons"],
+                        "entry_hint": squeeze_sync["entry_hint"],
+                        "reclaim_level": squeeze_sync["reclaim_level"],
+                    }
+                elif flip_setup and not reversal:
+                    reversal = {
+                        "side": "LONG",
+                        "label": flip_setup["label"],
+                        "reasons": flip_setup["reasons"],
+                        "entry_hint": flip_setup["entry_hint"],
+                        "reclaim_level": flip_setup["reclaim_level"],
+                    }
+
+                prob_context_side = auto_entry["side"] if auto_entry else (flip_setup["side"] if flip_setup else side)
+                prob_context_checks = checks_l if auto_entry and auto_entry["side"] == "LONG" else (checks_s if auto_entry and auto_entry["side"] == "SHORT" else chosen_checks)
+                prob_context_traps = chosen_traps
+                prob_context_reversal = reversal if (reversal and (not auto_entry or reversal["side"] == prob_context_side)) else None
+                prob_context_auto = auto_entry if auto_entry else None
+                prob_for_filter = probability_score(
+                    prob_context_side,
+                    prob_context_checks,
+                    prob_context_traps,
+                    prob_context_reversal,
+                    prob_context_auto,
+                    extra.get("ob"),
+                    extra.get("oi"),
+                    extra.get("premium"),
+                )
+
+                entry_filter = final_entry_filter(
+                    auto_entry["side"], cur,
+                    checks_l if auto_entry and auto_entry["side"] == "LONG" else checks_s,
+                    extra, auto_entry, is_closed=True, prob_for_filter=prob_for_filter
+                ) if auto_entry else {"checked": True, "passed": False, "reason": "ยังไม่มีสัญญาณเข้า", "fails": [], "prob": 0}
+
+                timing_side = auto_entry["side"] if auto_entry else (reversal["side"] if reversal else side)
+                commit_info = commit_check(timing_side, cur, auto_entry, atr_v, oi_v, prem)
+                locked_auto_entry = auto_entry if (entry_filter.get("passed") and commit_info.get("commit")) else None
+                shown_auto_entry = auto_entry if auto_entry else None
+
+                fake_move = detect_fake_move(side, chosen_checks, cur, prev, ob, oi_v, prem)
+                smash = detect_institutional_smash(cur, prev, ob, oi_v, prem, atr_v)
+                probable_smash = detect_probable_smash(side, cur, prev, ob, oi_v, prem, atr_v, chosen_checks, fake_move)
+                distribution_zone = detect_distribution_zone(side, cur, prev, atr_v, ef[-1], em[-1], es[-1], ob, oi_v, prem, fake_move)
+                early_break_ctx = detect_early_break(side, cur, prev, ob, oi_v, prem, atr_v)
+                probe_entry = detect_layered_probe_entry(side, prob_for_filter, probable_smash, early_break_ctx, distribution_zone)
+                if fake_move and fake_move.get("active") and ENABLE_TELEGRAM_FAKE_MOVE_ALERT and can_send_alert(f"FAKE-{fake_move.get('type')}-{cur['close_time']}"):
+                    send_telegram(build_special_event_message("FAKE_MOVE", cur, prev, extra, fake_move, side=side, checks=chosen_checks, traps=chosen_traps))
+                if smash and smash.get("active") and ENABLE_TELEGRAM_SMASH_ALERT and can_send_alert(f"SMASH-{smash.get('side')}-{cur['close_time']}"):
+                    send_telegram(build_special_event_message("SMASH", cur, prev, extra, smash, side=smash.get("side"), checks=chosen_checks, traps=chosen_traps))
+                if probable_smash and probable_smash.get("active") and ENABLE_TELEGRAM_SMASH_ALERT and can_send_alert(f"PROBABLE-SMASH-{probable_smash.get('side')}-{cur['close_time']}"):
+                    send_telegram(build_special_event_message("PROBABLE_SMASH", cur, prev, extra, probable_smash, side=probable_smash.get("side"), checks=chosen_checks, traps=chosen_traps))
+                if flip_setup and flip_setup.get("active") and can_send_alert(f"FLIP-{flip_setup.get('side')}-{cur['close_time']}"):
+                    send_telegram(build_special_event_message("FLIP", cur, prev, extra, flip_setup, side=flip_setup.get("side"), checks=checks_l, traps=traps_s))
+                if squeeze_sync and squeeze_sync.get("active") and can_send_alert(f"SQUEEZE-{squeeze_sync.get('side')}-{cur['close_time']}"):
+                    send_telegram(build_special_event_message("SQUEEZE", cur, prev, extra, squeeze_sync, side=squeeze_sync.get("side"), checks=checks_l, traps=traps_s))
+                if probe_entry and probe_entry.get("active") and ENABLE_TELEGRAM_PROBE_ALERT and can_send_alert(f"PROBE-{probe_entry.get('side')}-{cur['close_time']}"):
+                    send_telegram(build_special_event_message("LIVE", cur, prev, extra, probe_entry, side=probe_entry.get("side"), checks=chosen_checks, traps=chosen_traps))
+                early_entry = detect_early_entry(side, chosen_checks, reversal, shown_auto_entry, chosen_traps, prob_for_filter)
+                trap_exploit = detect_trap_exploit(side, chosen_traps, reversal, prob_for_filter)
+
+                timing_mode, _ = entry_timing_mode(timing_side, cur, atr_v, reversal, auto_entry)
+                oi_shift = oi_shift_text(timing_side, oi_v)
+                premium_shift = premium_shift_text(timing_side, prem)
+
+                if all(checks_s.values()):
+                    print_block(f"[{now()}] 🔥 A+ SHORT @ {fmt_price(cur['c'])} | V8.2 STRUCTURED STATE")
+                    print(f"CANDLE       : {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])} | CLOSED")
+                    print("BIAS         : SHORT BIAS")
+                    print("STATE        : SHORT confirmed")
+                    print("ACTION       : Enter SHORT")
+                    print(f"TRIGGER      : {price_trigger_hint('SHORT', prev)}")
+                    print(f"FAST READ    : {compact_reason(checks_s)}")
+                    print("=" * 100)
+                    if ENABLE_A_PLUS_ALERT and can_send_alert(f"SHORT-{cur['close_time']}"):
+                        send_telegram(build_alert_message("SHORT", cur["c"], checks_s, cur, prev, extra, traps_s))
+                elif all(checks_l.values()):
+                    print_block(f"[{now()}] 🔥 A+ LONG @ {fmt_price(cur['c'])} | V8.2 STRUCTURED STATE")
+                    print(f"CANDLE       : {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])} | CLOSED")
+                    print("BIAS         : LONG BIAS")
+                    print("STATE        : LONG confirmed")
+                    print("ACTION       : Enter LONG")
+                    print(f"TRIGGER      : {price_trigger_hint('LONG', prev)}")
+                    print(f"FAST READ    : {compact_reason(checks_l)}")
+                    print("=" * 100)
+                    if ENABLE_A_PLUS_ALERT and can_send_alert(f"LONG-{cur['close_time']}"):
+                        send_telegram(build_alert_message("LONG", cur["c"], checks_l, cur, prev, extra, traps_l))
+                else:
+                    print_log(
+                        title=f"{side} DEBUG",
+                        side=side,
+                        bias_text=bias_text,
+                        checks=chosen_checks,
+                        extra=extra,
+                        cur=cur,
+                        prev=prev,
+                        quality=signal_quality(chosen_checks),
+                        traps=chosen_traps,
+                        reversal=reversal,
+                        auto_entry=shown_auto_entry,
+                        entry_filter=entry_filter,
+                        timing_mode=timing_mode,
+                        oi_shift=oi_shift,
+                        premium_shift=premium_shift,
+                        commit_info=commit_info,
+                        fake_move=fake_move,
+                        early_entry=early_entry,
+                        trap_exploit=trap_exploit,
+                        smash=smash,
+                        probable_smash=probable_smash,
+                        probe_entry=probe_entry,
+                        distribution_zone=distribution_zone,
+                        flip_setup=flip_setup,
+                        expansion_long=expansion_long,
+                        squeeze_sync=squeeze_sync,
+                        is_closed=True,
+                    )
+
+                    if locked_auto_entry and ENABLE_AUTO_ENTRY_ALERT and can_send_alert(f"AUTO-{locked_auto_entry['side']}-{cur['close_time']}"):
+                        send_telegram(build_alert_message(side, cur["c"], chosen_checks, cur, prev, extra, chosen_traps, reversal, locked_auto_entry, entry_filter, commit_info))
+                    elif reversal and ENABLE_REVERSAL_ALERT and can_send_alert(f"REV-{reversal['side']}-{cur['close_time']}"):
+                        send_telegram(build_alert_message(side, cur["c"], chosen_checks, cur, prev, extra, chosen_traps, reversal, None, entry_filter, commit_info))
+                    elif chosen_traps and ENABLE_TRAP_ALERT and can_send_alert(f"TRAP-{side}-{cur['close_time']}"):
+                        send_telegram(build_alert_message(side, cur["c"], chosen_checks, cur, prev, extra, chosen_traps))
+
+                save_state(force=True)
+
+            open_cur = latest_open_candle(INTERVAL)
+            if open_cur is not None:
+                live_close = close[:-1] + [open_cur["c"]] if len(close) >= 1 else [open_cur["c"]]
+                ef_live = ema(live_close, EMA_FAST)
+                em_live = ema(live_close, EMA_MID)
+                es_live = ema(live_close, EMA_SLOW)
+
+                trend_s_live = ef_live[-1] < em_live[-1] < es_live[-1]
+                trend_l_live = ef_live[-1] > em_live[-1] > es_live[-1]
+
+                checks_s_live, checks_l_live = build_checks(open_cur, cur, trend_s_live, trend_l_live, htf_s, htf_l, ob, oi_v, prem)
+                side_live, chosen_live_checks = choose_side(checks_s_live, checks_l_live)
+                extra_live = {"ob": round(ob, 4), "oi": oi_v, "premium": prem, "atr": atr_v}
+
+                traps_live_s = detect_short_trap(open_cur, cur, atr_v, ob, oi_v, prem, checks_s_live)
+                traps_live_l = detect_long_trap(open_cur, cur, atr_v, ob, oi_v, prem, checks_l_live)
+                chosen_live_traps = traps_live_s if side_live == "SHORT" else traps_live_l
+                fake_pump_live = detect_fake_pump(open_cur, cur, atr_v, ob, oi_v, prem, trend_l_live, htf_s)
+                fake_dump_live = detect_fake_dump(open_cur, cur, atr_v, ob, oi_v, prem, trend_s_live, htf_l)
+                fake_move_live = fake_pump_live or fake_dump_live
+                flip_setup_live = detect_fake_dump_flip_long_setup(open_cur, cur, ob, oi_v, prem, atr_v, fake_move_live, checks_l_live)
+                expansion_long_live = detect_early_expansion_long(open_cur, cur, ob, oi_v, prem, atr_v, checks_l_live, fake_move_live, None)
+                squeeze_sync_live = detect_short_squeeze_sync(open_cur, cur, ob, oi_v, prem, atr_v, fake_move_live, checks_l_live, None, expansion_long_live)
+
+                reversal_live = detect_reversal_after_short_trap(open_cur, ob, oi_v, prem, _last_short_trap)
+                if squeeze_sync_live and not reversal_live:
+                    reversal_live = {
+                        "side": "LONG",
+                        "label": squeeze_sync_live["label"],
+                        "reasons": squeeze_sync_live["reasons"],
+                        "entry_hint": squeeze_sync_live["entry_hint"],
+                        "reclaim_level": squeeze_sync_live["reclaim_level"],
+                    }
+                elif flip_setup_live and not reversal_live:
+                    reversal_live = {
+                        "side": "LONG",
+                        "label": flip_setup_live["label"],
+                        "reasons": flip_setup_live["reasons"],
+                        "entry_hint": flip_setup_live["entry_hint"],
+                        "reclaim_level": flip_setup_live["reclaim_level"],
+                    }
+                if not reversal_live:
+                    reversal_live = detect_reversal_after_long_trap(open_cur, ob, oi_v, prem, _last_long_trap)
+
+                auto_entry_live = None
+                if _last_long_reversal:
+                    auto_entry_live = detect_auto_entry_after_short_trap(open_cur, ob, oi_v, prem, atr_v, _last_long_reversal)
+                if not auto_entry_live and _last_short_reversal:
+                    auto_entry_live = detect_auto_entry_after_long_trap(open_cur, ob, oi_v, prem, atr_v, _last_short_reversal)
+
+                prob_context_side_live = auto_entry_live["side"] if auto_entry_live else (flip_setup_live["side"] if flip_setup_live else side_live)
+                prob_context_checks_live = checks_l_live if auto_entry_live and auto_entry_live["side"] == "LONG" else (checks_s_live if auto_entry_live and auto_entry_live["side"] == "SHORT" else chosen_live_checks)
+                prob_context_traps_live = chosen_live_traps
+                prob_context_reversal_live = reversal_live if (reversal_live and (not auto_entry_live or reversal_live["side"] == prob_context_side_live)) else None
+                prob_context_auto_live = auto_entry_live if auto_entry_live else None
+                prob_for_filter_live = probability_score(
+                    prob_context_side_live,
+                    prob_context_checks_live,
+                    prob_context_traps_live,
+                    prob_context_reversal_live,
+                    prob_context_auto_live,
+                    extra_live.get("ob"),
+                    extra_live.get("oi"),
+                    extra_live.get("premium"),
+                )
+
+                entry_filter_live = final_entry_filter(
+                    auto_entry_live["side"], open_cur,
+                    checks_l_live if auto_entry_live and auto_entry_live["side"] == "LONG" else checks_s_live,
+                    extra_live, auto_entry_live, is_closed=False, prob_for_filter=prob_for_filter_live
+                ) if auto_entry_live else {"checked": True, "passed": False, "reason": "ยังไม่มีสัญญาณเข้า", "fails": [], "prob": 0}
+
+                timing_side_live = auto_entry_live["side"] if auto_entry_live else (reversal_live["side"] if reversal_live else side_live)
+                commit_info_live = commit_check(timing_side_live, open_cur, auto_entry_live, atr_v, oi_v, prem)
+                shown_auto_entry_live = auto_entry_live
+                locked_auto_entry_live = auto_entry_live if (entry_filter_live.get("passed") and commit_info_live.get("commit")) else None
+
+                fake_move_live = detect_fake_move(side_live, chosen_live_checks, open_cur, cur, ob, oi_v, prem)
+                smash_live = detect_institutional_smash(open_cur, cur, ob, oi_v, prem, atr_v)
+                probable_smash_live = detect_probable_smash(side_live, open_cur, cur, ob, oi_v, prem, atr_v, chosen_live_checks, fake_move_live)
+                distribution_zone_live = detect_distribution_zone(side_live, open_cur, cur, atr_v, ef_live[-1], em_live[-1], es_live[-1], ob, oi_v, prem, fake_move_live)
+                early_break_live_ctx = detect_early_break(side_live, open_cur, cur, ob, oi_v, prem, atr_v)
+                probe_entry_live = detect_layered_probe_entry(side_live, prob_for_filter_live, probable_smash_live, early_break_live_ctx, distribution_zone_live)
+                early_entry_live = detect_early_entry(side_live, chosen_live_checks, reversal_live, shown_auto_entry_live, chosen_live_traps, prob_for_filter_live)
+                trap_exploit_live = detect_trap_exploit(side_live, chosen_live_traps, reversal_live, prob_for_filter_live)
+
+                timing_mode_live, _ = entry_timing_mode(timing_side_live, open_cur, atr_v, reversal_live, auto_entry_live)
+                oi_shift_live = oi_shift_text(timing_side_live, oi_v)
+                premium_shift_live = premium_shift_text(timing_side_live, prem)
+
+                bias_text_live = market_bias_text(trend_s_live, trend_l_live, htf_s, htf_l)
+                if should_print_live_log(side_live, bias_text_live, chosen_live_checks, extra_live, open_cur, cur, chosen_live_traps, reversal_live, shown_auto_entry_live, fake_move_live, smash_live, probable_smash_live, probe_entry_live, distribution_zone_live):
+                    print_log(
+                        title="LIVE OPEN-CANDLE MONITOR",
+                        side=side_live,
+                        bias_text=bias_text_live,
+                        checks=chosen_live_checks,
+                        extra=extra_live,
+                        cur=open_cur,
+                        prev=cur,
+                        quality=signal_quality(chosen_live_checks),
+                        traps=chosen_live_traps,
+                        reversal=reversal_live,
+                        auto_entry=shown_auto_entry_live,
+                        entry_filter=entry_filter_live,
+                        timing_mode=timing_mode_live,
+                        oi_shift=oi_shift_live,
+                        premium_shift=premium_shift_live,
+                        commit_info=commit_info_live,
+                        fake_move=fake_move_live,
+                        early_entry=early_entry_live,
+                        trap_exploit=trap_exploit_live,
+                        smash=smash_live,
+                        probable_smash=probable_smash_live,
+                        probe_entry=probe_entry_live,
+                        distribution_zone=distribution_zone_live,
+                        flip_setup=flip_setup_live,
+                        expansion_long=expansion_long_live,
+                        squeeze_sync=squeeze_sync_live,
+                        is_closed=False,
+                    )
+
+                    if locked_auto_entry_live and ENABLE_AUTO_ENTRY_ALERT and can_send_alert(f"LIVE-AUTO-{locked_auto_entry_live['side']}-{open_cur['open_time']}"):
+                        send_telegram(build_alert_message(side_live, open_cur["c"], chosen_live_checks, open_cur, cur, extra_live, chosen_live_traps, reversal_live, locked_auto_entry_live, entry_filter_live, commit_info_live))
+                    maybe_send_live_summary(
+                        side_live, open_cur, cur, chosen_live_checks, extra_live, chosen_live_traps,
+                        reversal_live, shown_auto_entry_live, fake_move_live, smash_live, probable_smash_live,
+                        flip_setup_live, squeeze_sync_live,
+                    )
+
             time.sleep(SLEEP)
-            continue
 
-        close = [x["c"] for x in candles]
-        close_h = [x["c"] for x in htf]
-
-        ef = ema(close, EMA_FAST)
-        em = ema(close, EMA_MID)
-        es = ema(close, EMA_SLOW)
-
-        efh = ema(close_h, EMA_FAST)
-        emh = ema(close_h, EMA_MID)
-        esh = ema(close_h, EMA_SLOW)
-
-        cur = candles[-1]
-        prev = candles[-2]
-
-        prune_memory(cur)
-
-        ob = orderbook()
-        oi_v = oi()
-        prem = premium()
-        atr_v = atr(candles)
-
-        trend_s = ef[-1] < em[-1] < es[-1]
-        trend_l = ef[-1] > em[-1] > es[-1]
-        htf_s = efh[-1] < emh[-1] < esh[-1]
-        htf_l = efh[-1] > emh[-1] > esh[-1]
-
-        bias_side = current_bias_side(trend_s, trend_l, htf_s, htf_l)
-        if update_bias_memory(cur, bias_side):
+        except KeyboardInterrupt:
+            print(f"[{now()}] STOPPED BY USER")
             save_state(force=True)
-        maybe_reset_memory_on_bias_flip(cur, bias_side)
-
-        checks_s, checks_l = build_checks(cur, prev, trend_s, trend_l, htf_s, htf_l, ob, oi_v, prem)
-        extra = {
-            "ob": round(ob, 4),
-            "oi": oi_v,
-            "premium": prem,
-            "atr": atr_v,
-            "range": cur["h"] - cur["l"],
-            "body": abs(cur["c"] - cur["o"]),
-        }
-
-        if _last_closed_candle_logged != cur["close_time"]:
-            _last_closed_candle_logged = cur["close_time"]
-
-            traps_s = detect_short_trap(cur, prev, atr_v, ob, oi_v, prem, checks_s)
-            traps_l = detect_long_trap(cur, prev, atr_v, ob, oi_v, prem, checks_l)
-
-            if traps_s:
-                _last_short_trap = remember_trap("SHORT", cur, prev, traps_s)
-            if traps_l:
-                _last_long_trap = remember_trap("LONG", cur, prev, traps_l)
-
-            reversal = detect_reversal_after_short_trap(cur, ob, oi_v, prem, _last_short_trap)
-            if reversal and reversal["side"] == "LONG":
-                _last_long_reversal = remember_reversal("LONG", cur, _last_short_trap, reversal["reasons"], reversal["entry_hint"], reversal["reclaim_level"])
-
-            if not reversal:
-                reversal = detect_reversal_after_long_trap(cur, ob, oi_v, prem, _last_long_trap)
-                if reversal and reversal["side"] == "SHORT":
-                    _last_short_reversal = remember_reversal("SHORT", cur, _last_long_trap, reversal["reasons"], reversal["entry_hint"], reversal["reclaim_level"])
-
-            auto_entry = None
-            if _last_long_reversal:
-                auto_entry = detect_auto_entry_after_short_trap(cur, ob, oi_v, prem, atr_v, _last_long_reversal)
-            if not auto_entry and _last_short_reversal:
-                auto_entry = detect_auto_entry_after_long_trap(cur, ob, oi_v, prem, atr_v, _last_short_reversal)
-
-            side, chosen_checks = choose_side(checks_s, checks_l)
-            bias_text = market_bias_text(trend_s, trend_l, htf_s, htf_l)
-            chosen_traps = traps_s if side == "SHORT" else traps_l
-            fake_pump = detect_fake_pump(cur, prev, atr_v, ob, oi_v, prem, trend_l, htf_s)
-            fake_dump = detect_fake_dump(cur, prev, atr_v, ob, oi_v, prem, trend_s, htf_l)
-            fake_move = fake_pump or fake_dump
-            flip_setup = detect_fake_dump_flip_long_setup(cur, prev, ob, oi_v, prem, atr_v, fake_move, checks_l)
-            expansion_long = detect_early_expansion_long(cur, prev, ob, oi_v, prem, atr_v, checks_l, fake_move, reversal)
-            squeeze_sync = detect_short_squeeze_sync(cur, prev, ob, oi_v, prem, atr_v, fake_move, checks_l, reversal, expansion_long)
-            if squeeze_sync and not reversal:
-                reversal = {
-                    "side": "LONG",
-                    "label": squeeze_sync["label"],
-                    "reasons": squeeze_sync["reasons"],
-                    "entry_hint": squeeze_sync["entry_hint"],
-                    "reclaim_level": squeeze_sync["reclaim_level"],
-                }
-            elif flip_setup and not reversal:
-                reversal = {
-                    "side": "LONG",
-                    "label": flip_setup["label"],
-                    "reasons": flip_setup["reasons"],
-                    "entry_hint": flip_setup["entry_hint"],
-                    "reclaim_level": flip_setup["reclaim_level"],
-                }
-
-            prob_context_side = auto_entry["side"] if auto_entry else (flip_setup["side"] if flip_setup else side)
-            prob_context_checks = checks_l if auto_entry and auto_entry["side"] == "LONG" else (checks_s if auto_entry and auto_entry["side"] == "SHORT" else chosen_checks)
-            prob_context_traps = chosen_traps
-            prob_context_reversal = reversal if (reversal and (not auto_entry or reversal["side"] == prob_context_side)) else None
-            prob_context_auto = auto_entry if auto_entry else None
-            prob_for_filter = probability_score(
-                prob_context_side,
-                prob_context_checks,
-                prob_context_traps,
-                prob_context_reversal,
-                prob_context_auto,
-                extra.get("ob"),
-                extra.get("oi"),
-                extra.get("premium"),
-            )
-
-            entry_filter = final_entry_filter(
-                auto_entry["side"], cur,
-                checks_l if auto_entry and auto_entry["side"] == "LONG" else checks_s,
-                extra, auto_entry, is_closed=True, prob_for_filter=prob_for_filter
-            ) if auto_entry else {"checked": True, "passed": False, "reason": "ยังไม่มีสัญญาณเข้า", "fails": [], "prob": 0}
-
-            timing_side = auto_entry["side"] if auto_entry else (reversal["side"] if reversal else side)
-            commit_info = commit_check(timing_side, cur, auto_entry, atr_v, oi_v, prem)
-            locked_auto_entry = auto_entry if (entry_filter.get("passed") and commit_info.get("commit")) else None
-            shown_auto_entry = auto_entry if auto_entry else None
-
-            fake_move = detect_fake_move(side, chosen_checks, cur, prev, ob, oi_v, prem)
-            smash = detect_institutional_smash(cur, prev, ob, oi_v, prem, atr_v)
-            probable_smash = detect_probable_smash(side, cur, prev, ob, oi_v, prem, atr_v, chosen_checks, fake_move)
-            distribution_zone = detect_distribution_zone(side, cur, prev, atr_v, ef[-1], em[-1], es[-1], ob, oi_v, prem, fake_move)
-            early_break_ctx = detect_early_break(side, cur, prev, ob, oi_v, prem, atr_v)
-            probe_entry = detect_layered_probe_entry(side, prob_for_filter, probable_smash, early_break_ctx, distribution_zone)
-            if fake_move and fake_move.get("active") and ENABLE_TELEGRAM_FAKE_MOVE_ALERT and can_send_alert(f"FAKE-{fake_move.get('type')}-{cur['close_time']}"):
-                send_telegram(build_special_event_message("FAKE_MOVE", cur, prev, extra, fake_move, side=side, checks=chosen_checks, traps=chosen_traps))
-            if smash and smash.get("active") and ENABLE_TELEGRAM_SMASH_ALERT and can_send_alert(f"SMASH-{smash.get('side')}-{cur['close_time']}"):
-                send_telegram(build_special_event_message("SMASH", cur, prev, extra, smash, side=smash.get("side"), checks=chosen_checks, traps=chosen_traps))
-            if probable_smash and probable_smash.get("active") and ENABLE_TELEGRAM_SMASH_ALERT and can_send_alert(f"PROBABLE-SMASH-{probable_smash.get('side')}-{cur['close_time']}"):
-                send_telegram(build_special_event_message("PROBABLE_SMASH", cur, prev, extra, probable_smash, side=probable_smash.get("side"), checks=chosen_checks, traps=chosen_traps))
-            if flip_setup and flip_setup.get("active") and can_send_alert(f"FLIP-{flip_setup.get('side')}-{cur['close_time']}"):
-                send_telegram(build_special_event_message("FLIP", cur, prev, extra, flip_setup, side=flip_setup.get("side"), checks=checks_l, traps=traps_s))
-            if squeeze_sync and squeeze_sync.get("active") and can_send_alert(f"SQUEEZE-{squeeze_sync.get('side')}-{cur['close_time']}"):
-                send_telegram(build_special_event_message("SQUEEZE", cur, prev, extra, squeeze_sync, side=squeeze_sync.get("side"), checks=checks_l, traps=traps_s))
-            if probe_entry and probe_entry.get("active") and ENABLE_TELEGRAM_PROBE_ALERT and can_send_alert(f"PROBE-{probe_entry.get('side')}-{cur['close_time']}"):
-                send_telegram(build_special_event_message("LIVE", cur, prev, extra, probe_entry, side=probe_entry.get("side"), checks=chosen_checks, traps=chosen_traps))
-            early_entry = detect_early_entry(side, chosen_checks, reversal, shown_auto_entry, chosen_traps, prob_for_filter)
-            trap_exploit = detect_trap_exploit(side, chosen_traps, reversal, prob_for_filter)
-
-            timing_mode, _ = entry_timing_mode(timing_side, cur, atr_v, reversal, auto_entry)
-            oi_shift = oi_shift_text(timing_side, oi_v)
-            premium_shift = premium_shift_text(timing_side, prem)
-
-            if all(checks_s.values()):
-                print_block(f"[{now()}] 🔥 A+ SHORT @ {fmt_price(cur['c'])} | V8.2 STRUCTURED STATE")
-                print(f"CANDLE       : {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])} | CLOSED")
-                print("BIAS         : SHORT BIAS")
-                print("STATE        : SHORT confirmed")
-                print("ACTION       : Enter SHORT")
-                print(f"TRIGGER      : {price_trigger_hint('SHORT', prev)}")
-                print(f"FAST READ    : {compact_reason(checks_s)}")
-                print("=" * 100)
-                if ENABLE_A_PLUS_ALERT and can_send_alert(f"SHORT-{cur['close_time']}"):
-                    send_telegram(build_alert_message("SHORT", cur["c"], checks_s, cur, prev, extra, traps_s))
-            elif all(checks_l.values()):
-                print_block(f"[{now()}] 🔥 A+ LONG @ {fmt_price(cur['c'])} | V8.2 STRUCTURED STATE")
-                print(f"CANDLE       : {ts_to_str(cur['open_time'])} → {ts_to_str(cur['close_time'])} | CLOSED")
-                print("BIAS         : LONG BIAS")
-                print("STATE        : LONG confirmed")
-                print("ACTION       : Enter LONG")
-                print(f"TRIGGER      : {price_trigger_hint('LONG', prev)}")
-                print(f"FAST READ    : {compact_reason(checks_l)}")
-                print("=" * 100)
-                if ENABLE_A_PLUS_ALERT and can_send_alert(f"LONG-{cur['close_time']}"):
-                    send_telegram(build_alert_message("LONG", cur["c"], checks_l, cur, prev, extra, traps_l))
-            else:
-                print_log(
-                    title=f"{side} DEBUG",
-                    side=side,
-                    bias_text=bias_text,
-                    checks=chosen_checks,
-                    extra=extra,
-                    cur=cur,
-                    prev=prev,
-                    quality=signal_quality(chosen_checks),
-                    traps=chosen_traps,
-                    reversal=reversal,
-                    auto_entry=shown_auto_entry,
-                    entry_filter=entry_filter,
-                    timing_mode=timing_mode,
-                    oi_shift=oi_shift,
-                    premium_shift=premium_shift,
-                    commit_info=commit_info,
-                    fake_move=fake_move,
-                    early_entry=early_entry,
-                    trap_exploit=trap_exploit,
-                    smash=smash,
-                    probable_smash=probable_smash,
-                    probe_entry=probe_entry,
-                    distribution_zone=distribution_zone,
-                    flip_setup=flip_setup,
-                    expansion_long=expansion_long,
-                    squeeze_sync=squeeze_sync,
-                    is_closed=True,
-                )
-
-                if locked_auto_entry and ENABLE_AUTO_ENTRY_ALERT and can_send_alert(f"AUTO-{locked_auto_entry['side']}-{cur['close_time']}"):
-                    send_telegram(build_alert_message(side, cur["c"], chosen_checks, cur, prev, extra, chosen_traps, reversal, locked_auto_entry, entry_filter, commit_info))
-                elif reversal and ENABLE_REVERSAL_ALERT and can_send_alert(f"REV-{reversal['side']}-{cur['close_time']}"):
-                    send_telegram(build_alert_message(side, cur["c"], chosen_checks, cur, prev, extra, chosen_traps, reversal, None, entry_filter, commit_info))
-                elif chosen_traps and ENABLE_TRAP_ALERT and can_send_alert(f"TRAP-{side}-{cur['close_time']}"):
-                    send_telegram(build_alert_message(side, cur["c"], chosen_checks, cur, prev, extra, chosen_traps))
-
+            raise
+        except Exception as e:
+            print(f"[{now()}] ERROR: {e}")
             save_state(force=True)
+            time.sleep(5)
 
-        open_cur = latest_open_candle(INTERVAL)
-        if open_cur is not None:
-            live_close = close[:-1] + [open_cur["c"]] if len(close) >= 1 else [open_cur["c"]]
-            ef_live = ema(live_close, EMA_FAST)
-            em_live = ema(live_close, EMA_MID)
-            es_live = ema(live_close, EMA_SLOW)
 
-            trend_s_live = ef_live[-1] < em_live[-1] < es_live[-1]
-            trend_l_live = ef_live[-1] > em_live[-1] > es_live[-1]
-
-            checks_s_live, checks_l_live = build_checks(open_cur, cur, trend_s_live, trend_l_live, htf_s, htf_l, ob, oi_v, prem)
-            side_live, chosen_live_checks = choose_side(checks_s_live, checks_l_live)
-            extra_live = {"ob": round(ob, 4), "oi": oi_v, "premium": prem, "atr": atr_v}
-
-            traps_live_s = detect_short_trap(open_cur, cur, atr_v, ob, oi_v, prem, checks_s_live)
-            traps_live_l = detect_long_trap(open_cur, cur, atr_v, ob, oi_v, prem, checks_l_live)
-            chosen_live_traps = traps_live_s if side_live == "SHORT" else traps_live_l
-            fake_pump_live = detect_fake_pump(open_cur, cur, atr_v, ob, oi_v, prem, trend_l_live, htf_s)
-            fake_dump_live = detect_fake_dump(open_cur, cur, atr_v, ob, oi_v, prem, trend_s_live, htf_l)
-            fake_move_live = fake_pump_live or fake_dump_live
-            flip_setup_live = detect_fake_dump_flip_long_setup(open_cur, cur, ob, oi_v, prem, atr_v, fake_move_live, checks_l_live)
-            expansion_long_live = detect_early_expansion_long(open_cur, cur, ob, oi_v, prem, atr_v, checks_l_live, fake_move_live, None)
-            squeeze_sync_live = detect_short_squeeze_sync(open_cur, cur, ob, oi_v, prem, atr_v, fake_move_live, checks_l_live, None, expansion_long_live)
-
-            reversal_live = detect_reversal_after_short_trap(open_cur, ob, oi_v, prem, _last_short_trap)
-            if squeeze_sync_live and not reversal_live:
-                reversal_live = {
-                    "side": "LONG",
-                    "label": squeeze_sync_live["label"],
-                    "reasons": squeeze_sync_live["reasons"],
-                    "entry_hint": squeeze_sync_live["entry_hint"],
-                    "reclaim_level": squeeze_sync_live["reclaim_level"],
-                }
-            elif flip_setup_live and not reversal_live:
-                reversal_live = {
-                    "side": "LONG",
-                    "label": flip_setup_live["label"],
-                    "reasons": flip_setup_live["reasons"],
-                    "entry_hint": flip_setup_live["entry_hint"],
-                    "reclaim_level": flip_setup_live["reclaim_level"],
-                }
-            if not reversal_live:
-                reversal_live = detect_reversal_after_long_trap(open_cur, ob, oi_v, prem, _last_long_trap)
-
-            auto_entry_live = None
-            if _last_long_reversal:
-                auto_entry_live = detect_auto_entry_after_short_trap(open_cur, ob, oi_v, prem, atr_v, _last_long_reversal)
-            if not auto_entry_live and _last_short_reversal:
-                auto_entry_live = detect_auto_entry_after_long_trap(open_cur, ob, oi_v, prem, atr_v, _last_short_reversal)
-
-            prob_context_side_live = auto_entry_live["side"] if auto_entry_live else (flip_setup_live["side"] if flip_setup_live else side_live)
-            prob_context_checks_live = checks_l_live if auto_entry_live and auto_entry_live["side"] == "LONG" else (checks_s_live if auto_entry_live and auto_entry_live["side"] == "SHORT" else chosen_live_checks)
-            prob_context_traps_live = chosen_live_traps
-            prob_context_reversal_live = reversal_live if (reversal_live and (not auto_entry_live or reversal_live["side"] == prob_context_side_live)) else None
-            prob_context_auto_live = auto_entry_live if auto_entry_live else None
-            prob_for_filter_live = probability_score(
-                prob_context_side_live,
-                prob_context_checks_live,
-                prob_context_traps_live,
-                prob_context_reversal_live,
-                prob_context_auto_live,
-                extra_live.get("ob"),
-                extra_live.get("oi"),
-                extra_live.get("premium"),
-            )
-
-            entry_filter_live = final_entry_filter(
-                auto_entry_live["side"], open_cur,
-                checks_l_live if auto_entry_live and auto_entry_live["side"] == "LONG" else checks_s_live,
-                extra_live, auto_entry_live, is_closed=False, prob_for_filter=prob_for_filter_live
-            ) if auto_entry_live else {"checked": True, "passed": False, "reason": "ยังไม่มีสัญญาณเข้า", "fails": [], "prob": 0}
-
-            timing_side_live = auto_entry_live["side"] if auto_entry_live else (reversal_live["side"] if reversal_live else side_live)
-            commit_info_live = commit_check(timing_side_live, open_cur, auto_entry_live, atr_v, oi_v, prem)
-            shown_auto_entry_live = auto_entry_live
-            locked_auto_entry_live = auto_entry_live if (entry_filter_live.get("passed") and commit_info_live.get("commit")) else None
-
-            fake_move_live = detect_fake_move(side_live, chosen_live_checks, open_cur, cur, ob, oi_v, prem)
-            smash_live = detect_institutional_smash(open_cur, cur, ob, oi_v, prem, atr_v)
-            probable_smash_live = detect_probable_smash(side_live, open_cur, cur, ob, oi_v, prem, atr_v, chosen_live_checks, fake_move_live)
-            distribution_zone_live = detect_distribution_zone(side_live, open_cur, cur, atr_v, ef_live[-1], em_live[-1], es_live[-1], ob, oi_v, prem, fake_move_live)
-            early_break_live_ctx = detect_early_break(side_live, open_cur, cur, ob, oi_v, prem, atr_v)
-            probe_entry_live = detect_layered_probe_entry(side_live, prob_for_filter_live, probable_smash_live, early_break_live_ctx, distribution_zone_live)
-            early_entry_live = detect_early_entry(side_live, chosen_live_checks, reversal_live, shown_auto_entry_live, chosen_live_traps, prob_for_filter_live)
-            trap_exploit_live = detect_trap_exploit(side_live, chosen_live_traps, reversal_live, prob_for_filter_live)
-
-            timing_mode_live, _ = entry_timing_mode(timing_side_live, open_cur, atr_v, reversal_live, auto_entry_live)
-            oi_shift_live = oi_shift_text(timing_side_live, oi_v)
-            premium_shift_live = premium_shift_text(timing_side_live, prem)
-
-            bias_text_live = market_bias_text(trend_s_live, trend_l_live, htf_s, htf_l)
-            if should_print_live_log(side_live, bias_text_live, chosen_live_checks, extra_live, open_cur, cur, chosen_live_traps, reversal_live, shown_auto_entry_live, fake_move_live, smash_live, probable_smash_live, probe_entry_live, distribution_zone_live):
-                print_log(
-                    title="LIVE OPEN-CANDLE MONITOR",
-                    side=side_live,
-                    bias_text=bias_text_live,
-                    checks=chosen_live_checks,
-                    extra=extra_live,
-                    cur=open_cur,
-                    prev=cur,
-                    quality=signal_quality(chosen_live_checks),
-                    traps=chosen_live_traps,
-                    reversal=reversal_live,
-                    auto_entry=shown_auto_entry_live,
-                    entry_filter=entry_filter_live,
-                    timing_mode=timing_mode_live,
-                    oi_shift=oi_shift_live,
-                    premium_shift=premium_shift_live,
-                    commit_info=commit_info_live,
-                    fake_move=fake_move_live,
-                    early_entry=early_entry_live,
-                    trap_exploit=trap_exploit_live,
-                    smash=smash_live,
-                    probable_smash=probable_smash_live,
-                    probe_entry=probe_entry_live,
-                    distribution_zone=distribution_zone_live,
-                    flip_setup=flip_setup_live,
-                    expansion_long=expansion_long_live,
-                    squeeze_sync=squeeze_sync_live,
-                    is_closed=False,
-                )
-
-                if locked_auto_entry_live and ENABLE_AUTO_ENTRY_ALERT and can_send_alert(f"LIVE-AUTO-{locked_auto_entry_live['side']}-{open_cur['open_time']}"):
-                    send_telegram(build_alert_message(side_live, open_cur["c"], chosen_live_checks, open_cur, cur, extra_live, chosen_live_traps, reversal_live, locked_auto_entry_live, entry_filter_live, commit_info_live))
-                maybe_send_live_summary(
-                    side_live, open_cur, cur, chosen_live_checks, extra_live, chosen_live_traps,
-                    reversal_live, shown_auto_entry_live, fake_move_live, smash_live, probable_smash_live,
-                    flip_setup_live, squeeze_sync_live,
-                )
-
-        time.sleep(SLEEP)
-
-    except KeyboardInterrupt:
-        print(f"[{now()}] STOPPED BY USER")
-        save_state(force=True)
-        raise
-    except Exception as e:
-        print(f"[{now()}] ERROR: {e}")
-        save_state(force=True)
-        time.sleep(5)
+if __name__ == "__main__":
+    run_engine_forever()
