@@ -31,13 +31,10 @@ TZ_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "7"))
 # Backup config
 ENABLE_BACKUP = os.getenv("ENABLE_BACKUP", "true").lower() == "true"
 ENABLE_TELEGRAM_BACKUP = os.getenv("ENABLE_TELEGRAM_BACKUP", "true").lower() == "true"
-ENABLE_GDRIVE_BACKUP = os.getenv("ENABLE_GDRIVE_BACKUP", "true").lower() == "true"
+ENABLE_GDRIVE_BACKUP = False
 BACKUP_INTERVAL_SEC = int(os.getenv("BACKUP_INTERVAL_SEC", "300"))
 TELEGRAM_BACKUP_CHAT_ID = os.getenv("TELEGRAM_BACKUP_CHAT_ID") or os.getenv("CHAT_ID", "")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -228,7 +225,6 @@ class BackupManager:
             "last_error": None,
             "last_trigger_reason": None,
             "telegram": {"enabled": ENABLE_TELEGRAM_BACKUP, "last_success_at": None, "last_file": None, "last_error": None},
-            "gdrive": {"enabled": ENABLE_GDRIVE_BACKUP, "last_success_at": None, "last_file": None, "last_error": None},
         }
 
     def trigger_now(self, reason: str = "manual") -> None:
@@ -294,40 +290,6 @@ class BackupManager:
             )
         r.raise_for_status()
 
-    def _gdrive_client(self):
-        if not GDRIVE_FOLDER_ID:
-            raise RuntimeError("missing GDRIVE_FOLDER_ID")
-        creds_info = None
-        if GOOGLE_SERVICE_ACCOUNT_JSON:
-            creds_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        elif GOOGLE_SERVICE_ACCOUNT_FILE:
-            creds_info = json.loads(Path(GOOGLE_SERVICE_ACCOUNT_FILE).read_text(encoding="utf-8"))
-        else:
-            raise RuntimeError("missing GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE")
-
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        scopes = ["https://www.googleapis.com/auth/drive.file"]
-        creds = service_account.Credentials.from_service_account_info(creds_info, scopes=scopes)
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    def _gdrive_upsert(self, service, path: Path) -> None:
-        from googleapiclient.http import MediaFileUpload
-
-        query = (
-            f"name = '{path.name.replace("'", "\\'")}' and "
-            f"'{GDRIVE_FOLDER_ID}' in parents and trashed = false"
-        )
-        existing = service.files().list(q=query, fields="files(id,name)", pageSize=1).execute().get("files", [])
-        media = MediaFileUpload(str(path), resumable=True)
-        if existing:
-            file_id = existing[0]["id"]
-            service.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            meta = {"name": path.name, "parents": [GDRIVE_FOLDER_ID]}
-            service.files().create(body=meta, media_body=media, fields="id").execute()
-
     def _collect_files(self) -> List[Path]:
         files: List[Path] = []
         latest = latest_log_file()
@@ -340,17 +302,11 @@ class BackupManager:
     def _cycle(self) -> None:
         ensure_bootstrap_files()
         files = self._collect_files()
-        service = None
         for path in files:
             if ENABLE_TELEGRAM_BACKUP and self._should_send("telegram", path):
                 caption = f"BTC backup | {path.name} | {timestamp_text()}"
                 self._telegram_send_document(path, caption)
                 self._mark_success("telegram", path)
-            if ENABLE_GDRIVE_BACKUP and self._should_send("gdrive", path):
-                if service is None:
-                    service = self._gdrive_client()
-                self._gdrive_upsert(service, path)
-                self._mark_success("gdrive", path)
 
     def _run_loop(self) -> None:
         self.status["running"] = True
@@ -480,7 +436,7 @@ TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BTC Bot V9.2 Dashboard</title>
+  <title>BTC Bot V9.2.2 Telegram Backup Dashboard</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b1020; color:#e7ecf5; margin:0; }
     .wrap { max-width: 1440px; margin: 0 auto; padding: 20px; }
@@ -502,8 +458,8 @@ TEMPLATE = """
 </head>
 <body>
 <div class="wrap">
-  <h1>BTC Bot V9.2 Backup Dashboard</h1>
-  <p class="muted">Live log + daily log files + bot supervisor + backup status (Telegram + Google Drive)</p>
+  <h1>BTC Bot V9.2.2 Telegram Backup Dashboard</h1>
+  <p class="muted">Live log + daily log files + bot supervisor + backup status (Telegram only)</p>
   <div class="grid">
     <div class="stack">
       <div class="card">
@@ -554,17 +510,14 @@ function renderStatus(data) {
 
   const backup = data.backup || {};
   const tg = backup.telegram || {};
-  const gd = backup.gdrive || {};
   backupEl.innerHTML = `
     <div class="row"><span class="muted">backup loop</span><strong class="${backup.running ? 'ok' : 'warn'}">${backup.running}</strong></div>
     <div class="row"><span class="muted">last cycle</span><strong>${backup.last_cycle_at || '-'}</strong></div>
+    <div class="row"><span class="muted">trigger</span><strong>${backup.last_trigger_reason || '-'}</strong></div>
     <div class="row"><span class="muted">telegram</span><strong class="${tg.last_error ? 'err' : 'ok'}">${tg.enabled ? 'enabled' : 'disabled'}</strong></div>
-    <div class="row"><span class="muted">tg last file</span><strong>${tg.last_file || '-'}</strong></div>
-    <div class="row"><span class="muted">tg success</span><strong>${tg.last_success_at || '-'}</strong></div>
-    <div class="row"><span class="muted">gdrive</span><strong class="${gd.last_error ? 'err' : 'ok'}">${gd.enabled ? 'enabled' : 'disabled'}</strong></div>
-    <div class="row"><span class="muted">drive last file</span><strong>${gd.last_file || '-'}</strong></div>
-    <div class="row"><span class="muted">drive success</span><strong>${gd.last_success_at || '-'}</strong></div>
-    <div class="muted">${tg.last_error ? 'TG error: ' + tg.last_error + '<br>' : ''}${gd.last_error ? 'Drive error: ' + gd.last_error : ''}</div>
+    <div class="row"><span class="muted">last file</span><strong>${tg.last_file || '-'}</strong></div>
+    <div class="row"><span class="muted">last success</span><strong>${tg.last_success_at || '-'}</strong></div>
+    <div class="muted">${tg.last_error ? 'TG error: ' + tg.last_error : 'Telegram backup active'}</div>
   `;
 
   stateEl.innerHTML = `<pre>${JSON.stringify(data.state || {}, null, 2)}</pre>`;
